@@ -3,36 +3,36 @@
 A multi-turn coaching chatbot for technical and behavioural interview prep.
 Powered by RAG over a curated question bank and four LLM agents (Anthropic Claude).
 
-## Što radi
+## What it does
 
-Korisnik bira **rolu** (Data Analyst, QA Engineer, Data Engineer, Frontend
-Developer) i **nivo težine** (entry, mid, senior), uploaduje CV, i prolazi
-kroz sesiju od **5 pitanja** sa strukturisanim feedback-om posle svakog
-odgovora. Na kraju dobija personalizovan coaching report koji koristi CV za
-konkretne preporuke.
+The user picks a **role** (Data Analyst, QA Engineer, Data Engineer, Frontend
+Developer) and a **difficulty level** (entry, mid, senior), uploads a CV, and
+goes through a session of **5 questions** with structured feedback after each
+answer. At the end they receive a personalised coaching report that uses the
+CV for concrete recommendations.
 
-## Struktura sesije
+## Session structure
 
 ```
-Q1 — COVER       (fresh topic for the role)
+Q1 — COVER       (a fresh topic for the role)
 Q2 — REINFORCE   (same topic as Q1, difficulty adapts to score)
 Q3 — BEHAVIORAL  (STAR question)
-Q4 — COVER       (different fresh topic)
+Q4 — COVER       (a different fresh topic)
 Q5 — REINFORCE   (same topic as Q4, difficulty adapts to score)
 ```
 
-Posle svakog odgovora **Conversation Director agent** odlučuje da li ostaje
-na istom pitanju (clarify / followup / dig_deeper) ili prelazi na sledeći
-slot (move_on).
+After each answer the **Conversation Director agent** decides whether to stay
+on the current question (`clarify` / `followup` / `dig_deeper`) or to move on
+to the next planned slot (`move_on`).
 
-## Brz start
+## Quick start
 
-### 1. Zavisnosti
+### 1. Dependencies
 
 ```bash
 cd interview-prep-coach/simple
 
-# Make virtualenv (recommended)
+# Create a virtualenv (recommended)
 python -m venv venv
 source venv/bin/activate    # Mac / Linux
 # venv\Scripts\activate     # Windows
@@ -41,101 +41,102 @@ source venv/bin/activate    # Mac / Linux
 pip install -r requirements.txt
 ```
 
-### 2. API ključ
+### 2. API key
 
-Treba ti **Anthropic API ključ**. Registruj se na
-[console.anthropic.com](https://console.anthropic.com/settings/keys), klikni
-"Create Key", i kopiraj ključ (počinje sa `sk-ant-...`).
+You need an **Anthropic API key**. Sign up at
+[console.anthropic.com](https://console.anthropic.com/settings/keys),
+click "Create Key", and copy the key (it starts with `sk-ant-...`).
 
 ```bash
 # Copy the template
 cp .env.example .env
 
-# Edit .env and paste your key
+# Edit .env and paste your real key in place of the placeholder
 # ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-### 3. Pokreni
+### 3. Run
 
 ```bash
 streamlit run app.py
 ```
 
-Otvara se browser na `http://localhost:8501`.
+The browser opens automatically at `http://localhost:8501`.
 
-## Šta da pripremiš
+## What to prepare
 
-- **CV** kao PDF ili .txt fajl. Najjednostavniji način: **eksportuj svoj
-  LinkedIn profil kao PDF** (Profile → More → Save to PDF).
-  - Ako nemaš LinkedIn profil, napiši mali .txt sa skills, experience, i
-    projects (oko 200-300 reči je dovoljno).
+- **A CV** as a PDF or .txt file. Easiest path: **export your LinkedIn
+  profile as PDF** (Profile → More → Save to PDF).
+- If you don't have a LinkedIn profile, write a small .txt with your skills,
+  experience and projects (200–300 words is enough).
 
-## Arhitektura ukratko
+## Architecture in short
 
 ```
-app.py                       Streamlit UI (3 ekrana: setup, interview, final)
-├── core/models.py           Pydantic schemas (16 modela)
-├── core/llm.py              Thin Anthropic wrapper sa JSON validacijom
-├── core/kb.py               KB loader + Chroma retriever (129 pitanja)
-├── core/cv_parser.py        PDF/text → CVProfile
+app.py                       Streamlit UI (3 screens: setup, interview, final)
+├── core/models.py           Pydantic schemas (16 models)
+├── core/llm.py              Thin Anthropic wrapper with JSON validation
+├── core/kb.py               KB loader + Chroma retriever (129 questions)
+├── core/cv_parser.py        PDF / text → CVProfile
 ├── core/planner.py          Deterministic 5-slot scheduler
-└── core/agents.py           4 LLM agenta:
-                               - Interviewer (picks + paraphrases Q)
-                               - Evaluator (grades against rubric)
-                               - ConversationDirector (chooses next action) ★
+└── core/agents.py           Four LLM agents:
+                               - Interviewer (picks + paraphrases the question)
+                               - Evaluator (grades against the rubric)
+                               - ConversationDirector (chooses the next action) ★
                                - CoachingSummariser (final report) ★
 ```
 
-★ = formalni agentski deo (action selection u petlji + generative personalization).
+★ = formally agentic component (action selection in a loop + generative
+personalisation).
 
-Vidi `ARCHITECTURE.md` za detaljan opis svake komponente i data flow-a.
+See `ARCHITECTURE.md` for a detailed description of each component and the
+data flow.
 
 ## Knowledge base
 
-**129 kuriranih pitanja** u 3 JSONL fajla pod `../data/`:
+**129 curated questions** in 3 JSONL files under `data/`:
 
-| Fajl | # pitanja | Sadržaj |
-|------|-----------|---------|
-| `questions_da_qa.jsonl` | 60 | Data Analyst + QA Engineer |
-| `questions_de_fe.jsonl` | 60 | Data Engineer + Frontend Developer |
-| `questions_behavioural.jsonl` | 9 | STAR questions, role-agnostic |
+| File                              | # questions | Content                            |
+|-----------------------------------|-------------|------------------------------------|
+| `questions_da_qa.jsonl`           | 60          | Data Analyst + QA Engineer         |
+| `questions_de_fe.jsonl`           | 60          | Data Engineer + Frontend Developer |
+| `questions_behavioural.jsonl`     |  9          | STAR questions, role-agnostic      |
 
-Svako pitanje ima topic, subtopic, difficulty, reference_answer, rubric (3
-dimenzije), tags, i skill_tags za CV-aware retrieval.
+Every question has a topic, subtopic, difficulty, reference answer, a rubric
+(3 dimensions), tags, and `skill_tags` for CV-aware retrieval.
 
 ## Troubleshooting
 
-**`ANTHROPIC_API_KEY not set`** — proveri da li je `.env` u `simple/`
-folderu i da li si upisala ključ.
+**`ANTHROPIC_API_KEY not set`** — make sure `.env` is in the `simple/`
+folder and contains your real key.
 
-**Chroma greška pri startu** — pri prvom run-u, Chroma indeksira sva 129
-pitanja, što može da potraje 10-20 sekundi. Drugi put će biti instant
-(cache je na `simple/.chroma/`).
+**Chroma error on startup** — on first run, Chroma indexes all 129
+questions, which can take 10–20 seconds. The second run is instant (cache
+is at `simple/.chroma/`).
 
-**`pypdf` greška na CV uploadu** — CV mora da bude PDF sa text layer-om
-(eksportovan iz Word-a, LinkedIn-a, Google Docs-a). Skenirani PDF ne radi.
+**`pypdf` error on CV upload** — the CV must be a PDF with a text layer
+(exported from Word, LinkedIn, Google Docs). Scanned PDFs do not work.
 
-**Sesija nestane na refresh** — to je očekivano; ova jednostavna verzija
-drži state u memoriji bez SQLite-a. Refresh = nova sesija.
+**Session disappears on refresh** — this is by design; the simplified
+version keeps state in memory, no SQLite. A refresh starts a new session.
 
-## Tehnologije
+## Technologies
 
-- **Streamlit** za UI (single-file Python web app)
-- **Anthropic Claude** (`claude-sonnet-4-5`) za sve LLM pozive
-- **ChromaDB** za vector store i semantic retrieval
-- **Pydantic** za type-safe data contracts
-- **pypdf** za PDF text extraction
-- **Bez LangChain-a** — direktan Anthropic SDK za jednostavnost i
-  transparentnost
+- **Streamlit** for the UI (single-file Python web app)
+- **Anthropic Claude** (`claude-sonnet-4-5`) for every LLM call
+- **ChromaDB** for the vector store and semantic retrieval
+- **Pydantic** for type-safe data contracts
+- **pypdf** for PDF text extraction
+- **No LangChain** — direct Anthropic SDK for simplicity and transparency
 
-## Razvoj
+## Development
 
-Pokreni testove (kad postanu):
+Run the tests (once they exist):
 
 ```bash
 pytest tests/
 ```
 
-## Licenca
+## License
 
 University course project — Interview Prep Coach, 2025.

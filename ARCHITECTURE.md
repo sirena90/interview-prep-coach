@@ -1,28 +1,29 @@
 # Interview Prep Coach — Architecture (Simplified Streamlit Version)
 
-> Reference dokument za projekat. Detaljno objašnjava svaku komponentu,
-> data flow, i agentske patterne. Pisano da služi i kao priprema za
-> prezentaciju projekta i kao readme za tim.
+> Reference document for the project. Describes each component, the data
+> flow, and the agentic patterns. Serves both as a presentation aid and as
+> a team-facing readme.
 
 ---
 
-## 1. O čemu je projekat
+## 1. What the project is
 
-**Interview Prep Coach** je multi-turn coaching chatbot koji pomaže kandidatima
-da se pripreme za tehničke i behavioralne intervjue za 4 role:
+**Interview Prep Coach** is a multi-turn coaching chatbot that helps
+candidates prepare for technical and behavioural interviews for four roles:
 
 - Data Analyst
 - QA Engineer
 - Data Engineer
 - Frontend Developer
 
-Korisnik bira rolu i nivo težine, uploaduje CV, i prolazi kroz sesiju od 5
-pitanja. Posle svakog odgovora dobija strukturisan feedback. Na kraju dobija
-personalizovan coaching report koji koristi CV za konkretne preporuke.
+The user picks a role and a difficulty level, uploads a CV, and goes through
+a 5-question session. After every answer they receive structured feedback.
+At the end they receive a personalised coaching report that uses the CV for
+concrete recommendations.
 
 ---
 
-## 2. Sažeta arhitektura
+## 2. Architecture at a glance
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
@@ -30,7 +31,7 @@ personalizovan coaching report koji koristi CV za konkretne preporuke.
 │  Setup → Q1 → Q2 → Q3 → Q4 → Q5 → Final Report                          │
 └───────┬─────────────────────────────────────────────────────────────────┘
         │
-        │ session_state (Pydantic SessionState in memory)
+        │ session_state (Pydantic SessionState held in memory)
         │
         ↓
 ┌──────────────────────┐  ┌─────────────────┐  ┌─────────────────────────┐
@@ -38,7 +39,7 @@ personalizovan coaching report koji koristi CV za konkretne preporuke.
 │  (Python, no LLM)    │  │  (Chroma)       │  │                         │
 │                      │  │                 │  │  - Interviewer          │
 │  5-slot pattern:     │  │  129 questions  │  │  - Evaluator            │
-│  cover · reinforce · │  │  4 JSONL files  │  │  - Director ★           │
+│  cover · reinforce · │  │  3 JSONL files  │  │  - Director ★           │
 │  behavioral · cover ·│  │  Vector search  │  │  - Coaching Summariser ★│
 │  reinforce           │  │  + metadata     │  │                         │
 └──────────────────────┘  └─────────────────┘  └─────────────────────────┘
@@ -58,24 +59,25 @@ personalizovan coaching report koji koristi CV za konkretne preporuke.
                         └──────────────┘
 ```
 
-**★** = formalni agentski deo sistema (action selection u petlji + generative
-personalization). Sve ostalo su deterministički ili LLM komponente.
+**★** = formally agentic component (action selection in a loop + generative
+personalisation). Everything else is deterministic Python or single-shot
+LLM calls.
 
 ---
 
-## 3. Sesija — 5-pitanja pattern
+## 3. Session — the 5-question pattern
 
-Sesija ima **fiksan raspored slotova**:
+A session has a **fixed slot pattern**:
 
-| Slot | Tip | Logika |
-|------|-----|--------|
-| Q1   | COVER       | Random uncovered topic for the role, base difficulty |
-| Q2   | REINFORCE   | Same topic as Q1, difficulty adjusted by Q1's score  |
-| Q3   | BEHAVIORAL  | STAR question, base difficulty                       |
-| Q4   | COVER       | Different uncovered topic, base difficulty           |
-| Q5   | REINFORCE   | Same topic as Q4, difficulty adjusted by Q4's score  |
+| Slot | Type        | Logic                                                                  |
+|------|-------------|------------------------------------------------------------------------|
+| Q1   | COVER       | Random uncovered topic for the role, base difficulty                   |
+| Q2   | REINFORCE   | Same topic as Q1, difficulty adjusted by Q1's score                    |
+| Q3   | BEHAVIORAL  | STAR question, base difficulty                                         |
+| Q4   | COVER       | A different uncovered topic, base difficulty                           |
+| Q5   | REINFORCE   | Same topic as Q4, difficulty adjusted by Q4's score                    |
 
-### Adaptive difficulty pravila (za reinforce slotove)
+### Adaptive difficulty rules (for reinforce slots)
 
 ```
 prev_score < 0.4 (1-2/5)      → STEP DOWN  (e.g. mid → entry)
@@ -83,143 +85,150 @@ prev_score > 0.85 (5/5)       → STEP UP    (e.g. mid → senior)
 otherwise (3-4/5)             → STAY at base difficulty
 ```
 
-Difficulty se klipuje na ENTRY (najlakše) i SENIOR (najteže).
+Difficulty is floored at ENTRY (easiest) and capped at SENIOR (hardest).
 
-### Director Agent može da unutra petlja
+### The Director Agent can loop inside a slot
 
-Posle Evaluator-a, **Director Agent** odlučuje šta dalje. Ako bira
-`clarify`, `followup`, ili `dig_deeper` — sistem ostaje na **istom pitanju**
-i traži dodatni odgovor. Tek kad Director kaže `move_on`, Planner bira sledeći slot.
+After the Evaluator, the **Director Agent** decides what comes next. If it
+picks `clarify`, `followup`, or `dig_deeper`, the system **stays on the
+current question** and waits for another answer. Only when the Director
+picks `move_on` does the Planner choose the next slot.
 
-To znači da jedan slot može imati više "round-ova" konverzacije pre nego što
-se zatvori.
+That means a single slot can have multiple rounds of conversation before it
+closes.
 
 ---
 
-## 4. Komponente — šta svaka radi
+## 4. Components — what each one does
 
 ### 4.1 Streamlit UI (`app.py`)
 
-Sve što korisnik vidi. Drži flow:
+Everything the user sees. Drives the flow:
 
-1. **Setup screen** — bira rolu (dropdown), težinu (radio), uploaduje CV (file_uploader)
-2. **Loop screen** — za svaki turn:
-   - Prikazuje pitanje (Q1...Q5)
-   - Prima odgovor preko `st.chat_input`
-   - Pokazuje feedback (ScoreReport)
-   - Ako Director kaže "stay" — nastavi konverzaciju
-   - Ako Director kaže "move_on" — Planner bira sledeći slot
-3. **Final report screen** — prikazuje SessionSummary sa coaching letter-om
+1. **Setup screen** — pick role (dropdown), difficulty (radio), upload CV (file_uploader)
+2. **Loop screen** — for each turn:
+   - Display the question (Q1…Q5)
+   - Receive the answer via `st.chat_input`
+   - Show feedback (the ScoreReport)
+   - If the Director says "stay" — continue the conversation
+   - If the Director says "move_on" — Planner picks the next slot
+3. **Final report screen** — display the SessionSummary including the coaching letter
 
-Sve stanje sesije živi u `st.session_state` (in-memory, briše se na refresh).
+All session state lives in `st.session_state` (in-memory, cleared on refresh).
 
-### 4.2 Pydantic šeme (`core/models.py`)
+### 4.2 Pydantic schemas (`core/models.py`)
 
-Sve strukture podataka. 16 modela u 5 grupa:
+All data structures. 16 models in 5 groups:
 
-- **Enumi**: `Topic`, `Difficulty`, `Role`, `SlotType`, `DirectorAction`
+- **Enums**: `Topic`, `Difficulty`, `Role`, `SlotType`, `DirectorAction`
 - **KB**: `Question`, `Rubric`
 - **Agent outputs**: `InterviewerChoice`, `ScoreReport`, `DimensionScore`, `DirectorChoice`, `CVProfile`
 - **Session state**: `SessionState`, `TurnRecord`, `RollingScore`
 - **Final**: `SessionSummary`
 
-Pydantic obavezuje da svi agenti vrate validan JSON koji se mapira u tip-safe Python objekte.
+Pydantic forces every agent to return valid JSON that maps onto type-safe
+Python objects.
 
 ### 4.3 LLM wrapper (`core/llm.py`)
 
-Tanak omotač oko Anthropic API-ja. Jedna funkcija:
+A thin wrapper around the Anthropic API. One function:
 
 ```python
 result = call_llm(system=SYSTEM_PROMPT, user=user_msg, schema=ScoreReport)
 ```
 
-Šta radi:
-- Poziva `claude-sonnet-4-5-20250929`
-- Strip-uje ```json fence-ove ako ih model doda
-- Parse-uje JSON
-- Validira kroz Pydantic
-- Retry jednom sa repair prompt-om ako prvi response nije validan
+What it does:
+- Calls `claude-sonnet-4-5-20250929`
+- Strips ```json fences if the model adds them
+- Parses JSON
+- Validates against the Pydantic schema
+- Retries once with a repair prompt if the first response doesn't parse
 
-Bez ovog wrapper-a, svaki agent bi morao ručno da parsuje JSON i radi retry — sa wrapper-om agenti su jednolinijaši.
+Without this wrapper every agent would have to parse JSON and run retries
+manually — with the wrapper, each agent becomes a one-liner.
 
 ### 4.4 Knowledge Base + Chroma (`core/kb.py`)
 
-Pri startu:
-- Učita 3 JSONL fajla (questions_da_qa, questions_de_fe, questions_behavioural)
-- Indeksira ih u Chroma vector store
-- Document = tekst pitanja, Metadata = topic, difficulty, skill_tags
+At startup:
+- Loads the 3 JSONL files (questions_da_qa, questions_de_fe, questions_behavioural)
+- Indexes them in a Chroma vector store
+- Document = the question text, Metadata = topic, difficulty, skill_tags
 
-Glavne metode:
-- `retrieve(topic, difficulty, excluded_ids, cv_skills)` → kandidati za tehnički slot
-- `retrieve_behavioural(difficulty, excluded_ids)` → kandidati za behavioral slot
-- `topics_for_role(role)` → koje teme su validne za izabranu rolu
+Main methods:
+- `retrieve(topic, difficulty, excluded_ids, cv_skills)` → candidates for a technical slot
+- `retrieve_behavioural(difficulty, excluded_ids)` → candidates for a behavioural slot
+- `topics_for_role(role)` → which topics are valid for the selected role
 
-**CV-aware reranking:** ako `cv_skills` prosleđeno, pitanja čiji se `skill_tags` preklapaju sa CV-jem (npr. korisnik pominje PostgreSQL → pitanja sa `postgresql` tag-om) dobijaju prioritet u rezultatu.
+**CV-aware reranking:** if `cv_skills` is passed, questions whose `skill_tags`
+overlap with the CV signals (e.g. the user mentions PostgreSQL → questions
+tagged `postgresql` get priority).
 
-**Fallback logika:**
-- Ako nema kandidata na traženoj težini → spušta na lakšu
-- Ako ni tu nema → bilo koja težina unutar topic-a
+**Fallback logic:**
+- If there are no candidates at the requested difficulty → drops to an easier one
+- If still nothing → any difficulty within the topic
 
 ### 4.5 Planner (`core/planner.py`)
 
-Deterministički Python (NIJE LLM agent — to je svesna odluka radi predvidivosti i explainability-ja).
+Deterministic Python (NOT an LLM agent — deliberately, for predictability
+and explainability).
 
-Glavna metoda:
+Main method:
 
 ```python
 plan = planner.plan_next_turn(session_state)
 # Returns TurnPlan(slot_type, topic, difficulty)
 ```
 
-Pravila:
-- Q1, Q4: COVER → bira uncovered topic za rolu
-- Q2, Q5: REINFORCE → koristi topic prethodnog COVER turn-a, adjustuje difficulty
-- Q3: BEHAVIORAL → uvek behavioural topic
+Rules:
+- Q1, Q4: COVER → pick an uncovered topic for the role
+- Q2, Q5: REINFORCE → reuse the previous COVER's topic, adjust difficulty
+- Q3: BEHAVIORAL → always the behavioural topic
 
-### 4.6 Agenti (`core/agents.py`)
+### 4.6 Agents (`core/agents.py`)
 
-Četiri LLM agenta, svaki sa svojom svrhom:
+Four LLM agents, each with one job:
 
 #### InterviewerAgent
-- **Input:** lista kandidata iz Retriever-a + CV profile
+- **Input:** list of candidate questions from the Retriever + CV profile
 - **Output:** `InterviewerChoice(id, phrased)`
-- **Zadatak:** izabere jedan kandidat i parafrazira ga prirodno, eventualno referencirajući CV
-- **Fast path:** ako ima samo 1 kandidat, ne zove LLM
-- **Defensive:** ako LLM izmisli ID koji nije u kandidatima → fallback na prvi
+- **Job:** pick one candidate and paraphrase it naturally, optionally referencing the CV
+- **Fast path:** if there is only one candidate, no LLM call
+- **Defensive:** if the LLM invents an id not in the candidates → falls back to the first
 
 #### EvaluatorAgent
-- **Input:** Question (sa rubric, reference_answer) + user_answer
-- **Output:** `ScoreReport` (content/clarity/structure 1-5 + feedback bullets + overall)
-- **Zadatak:** strukturirana ocena po rubricu
+- **Input:** Question (with rubric, reference_answer) + user_answer
+- **Output:** `ScoreReport` (content / clarity / structure 1–5 + feedback bullets + overall)
+- **Job:** structured grading against the rubric
 
 #### ConversationDirectorAgent ★ AGENT #1
 - **Input:** Question + user_answer + ScoreReport + history
 - **Output:** `DirectorChoice(action, text)`
-- **Akcije:** clarify, followup, dig_deeper, move_on
-- **Zašto je ovo "pravi agent":** bira akciju iz fiksnog skupa na osnovu posmatranja, u zatvorenoj petlji. To je formalna definicija agenta.
+- **Actions:** clarify, followup, dig_deeper, move_on
+- **Why this is "the real agent":** it picks an action from a fixed set based on observation, in a closed loop. That matches the formal definition of an agent.
 
 #### CoachingSummariserAgent ★ AGENT #2
-- **Input:** ceo SessionState + CVProfile
-- **Output:** `SessionSummary` sa coaching_letter
-- **Zašto je ovo agentski:** generativna personalizacija — sintetiše long-form content iz bogatog konteksta, koristi CV za konkretne reference
+- **Input:** the full SessionState + CVProfile
+- **Output:** `SessionSummary` including a coaching_letter
+- **Why this is also agentic:** generative personalisation — it synthesises long-form content from rich context, using the CV for concrete references.
 
 ### 4.7 CV Parser (`core/cv_parser.py`)
 
-Dve funkcije:
-- `extract_cv_text(file)` — pulls text iz PDF-a (`pypdf`) ili .txt fajla
-- `parse_cv(text, role)` — šalje tekst LLM-u, vraća strukturirani `CVProfile`
+Two functions:
+- `extract_cv_text(file)` — pulls text from a PDF (via `pypdf`) or a .txt file
+- `parse_cv(text, role)` — sends the text to the LLM, returns a structured `CVProfile`
 
-CVProfile sadrži: skills, projects, seniority estimate, claimed_strengths, likely_gaps.
+CVProfile contains: skills, projects, seniority estimate, claimed_strengths, likely_gaps.
 
-CV se koristi na dva mesta:
-1. **Retriever** — boost-uje pitanja čiji se skill_tags preklapaju sa CV skills
-2. **Coaching Summariser** — referencira projekte iz CV-ja u final report-u
+The CV is used in two places:
+1. **Retriever** — boosts questions whose skill_tags overlap with the CV skills
+2. **Coaching Summariser** — references CV projects inside the final report
 
 ---
 
-## 5. Dva agentska patterna
+## 5. Two agentic patterns
 
-Naš projekat demonstrira **dva različita agentska patterna**, što je važno za rubriku kursa:
+The project demonstrates **two distinct agentic patterns**, which matters for
+the course rubric:
 
 ### Pattern 1: Action Selection (Director)
 
@@ -227,101 +236,101 @@ Naš projekat demonstrira **dva različita agentska patterna**, što je važno z
 Observation → Decision (from fixed action set) → Action → Loop
 ```
 
-Director posmatra ScoreReport, bira jednu od 4 akcije, akcija menja stanje sistema, pa se loop ponavlja. To je klasični RL-style agent.
+The Director observes the ScoreReport, picks one of 4 actions, the action
+changes system state, and the loop repeats. Classic RL-style agent.
 
-### Pattern 2: Generative Personalization (Coaching Summariser)
+### Pattern 2: Generative Personalisation (Coaching Summariser)
 
 ```
-Rich context → Synthesis → Long-form personalized output
+Rich context → Synthesis → Long-form personalised output
 ```
 
-Coach prima ceo session state plus CV, sintetiše coherent personalized text. To je "agent" u smislu autonomne kreativne sinteze.
+The Coach takes the full session state plus the CV and synthesises coherent
+personalised text. This is an "agent" in the sense of autonomous creative
+synthesis.
 
-**Plus 2 supporting LLM komponente:**
+**Plus 2 supporting LLM components:**
 - Interviewer (LLM-as-selector)
 - Evaluator (LLM-as-judge)
 - CV Parser (LLM-as-extractor)
 
-Ukupno **5 LLM poziva po sesiji minimum** (1 CV parse + 5×Evaluator + 5×Director + 5×Interviewer ako ima više kandidata + 1 Coach = ~20 poziva po sesiji).
+Total **5 LLM calls per session minimum** (1 CV parse + 5 × Evaluator + 5 × Director + 5 × Interviewer when there are multiple candidates + 1 Coach ≈ ~20 calls per session).
 
 ---
 
-## 6. Data flow — kompletan walkthrough
+## 6. Data flow — complete walkthrough
 
-Korisnik je Data Analyst, mid level, ima CV koji pominje PostgreSQL, Tableau, Python, A/B testing.
+The user is a Data Analyst, mid level, with a CV mentioning PostgreSQL,
+Tableau, Python, A/B testing.
 
-### Pre sesije
+### Before the session
 
-1. UI: korisnik bira "Data Analyst" + "mid"
-2. UI: uploaduje CV.pdf (`st.file_uploader`)
-3. `extract_cv_text(file)` izvuče text iz PDF-a
+1. UI: the user picks "Data Analyst" + "mid"
+2. UI: uploads CV.pdf (`st.file_uploader`)
+3. `extract_cv_text(file)` extracts text from the PDF
 4. `parse_cv(text, role=DA)` → LLM call → `CVProfile(skills=["PostgreSQL", "Tableau", ...], projects=[...])`
-5. UI: kreira `SessionState(role=DA, difficulty=mid, target_turns=5, cv_profile=...)`
-6. Klik "Start"
+5. UI: creates `SessionState(role=DA, difficulty=mid, target_turns=5, cv_profile=...)`
+6. Click "Start"
 
 ### Q1 — COVER, SQL
 
 1. `planner.plan_next_turn(state)` → `TurnPlan(COVER, SQL, mid)`
-2. `kb.retrieve(SQL, mid, excluded={}, cv_skills=["PostgreSQL","Tableau","Python"])` → 5 kandidata, postgresql-tagged prvi
+2. `kb.retrieve(SQL, mid, excluded={}, cv_skills=["PostgreSQL","Tableau","Python"])` → 5 candidates, postgresql-tagged ones first
 3. `interviewer.ask(candidates, SQL, mid, cv_profile)` → `InterviewerChoice(id="da-001", phrased="Since you've worked with PostgreSQL at...")`
-4. UI prikazuje pitanje
-5. Korisnik kuca odgovor
+4. UI shows the question
+5. The user types an answer
 6. `evaluator.evaluate(question, answer)` → `ScoreReport(content=3, clarity=4, structure=3, overall=3)`
-7. UI prikazuje feedback
+7. UI displays feedback
 8. `director.decide_next_action(question, answer, score)` → `DirectorChoice(action=MOVE_ON, text="")`
 9. Update SessionState: append TurnRecord, update topic_scores[SQL]
-10. Director rekao MOVE_ON → idi na sledeći slot
+10. Director said MOVE_ON → go to the next slot
 
-### Q2 — REINFORCE, SQL (entry, stepped down zbog Q1 score=3)
+### Q2 — REINFORCE, SQL (stays at mid because Q1 score = 3, in the stay zone)
 
-Wait — Q1 score je 3, što je medium. Pravilo: < 0.4 step down, > 0.85 step up, inače stay. 3/5 normalized je 0.5, što je u "stay" zoni → ostaje mid.
+`planner.plan_next_turn(state)` → `TurnPlan(REINFORCE, SQL, mid)` ← same topic, same difficulty.
 
-Idi na Q2 sa SQL mid.
-
-Q2: `planner.plan_next_turn(state)` → `TurnPlan(REINFORCE, SQL, mid)` ← same topic, same difficulty
-
-Ostatak isto kao Q1.
+The rest is the same as Q1.
 
 ### Q3 — BEHAVIORAL
 
 1. Planner → `TurnPlan(BEHAVIORAL, BEHAVIOURAL, mid)`
-2. `kb.retrieve_behavioural(mid, excluded={})` → STAR pitanja
-3. Interviewer bira jedno (npr. conflict resolution)
-4. Korisnik odgovara → Evaluator → Director → MOVE_ON
+2. `kb.retrieve_behavioural(mid, excluded={})` → STAR questions
+3. Interviewer picks one (e.g. conflict resolution)
+4. The user answers → Evaluator → Director → MOVE_ON
 
 ### Q4 — COVER, Data Visualization
 
-1. Planner → `TurnPlan(COVER, DATA_VISUALIZATION, mid)` (drugačiji od Q1 jer Q1 je već pokrio SQL)
-2. CV ima Tableau → Retriever prioritizuje pitanja sa `tableau` tag-om
-3. Ostatak isto
+1. Planner → `TurnPlan(COVER, DATA_VISUALIZATION, mid)` (a different topic from Q1 because Q1 already covered SQL)
+2. The CV has Tableau → Retriever prioritises questions tagged `tableau`
+3. Same as before
 
 ### Q5 — REINFORCE, Data Visualization
 
-1. Planner gleda Q4 score, adjustuje difficulty
-2. Slot type je REINFORCE, isti topic kao Q4
+1. Planner looks at the Q4 score, adjusts difficulty
+2. Slot type is REINFORCE, same topic as Q4
 
 ### Final
 
-1. Posle Q5, sesija je gotova (turn_count = target_turns)
+1. After Q5 the session ends (turn_count = target_turns)
 2. `coach.summarise(session_state)` → `SessionSummary(...)`
-   - Koristi sve TurnRecord-e
-   - Koristi CVProfile za personalizaciju
-   - Vrati coaching_letter koji referenciše PostgreSQL/Tableau iskustvo
-3. UI prikazuje final report
+   - Uses every TurnRecord
+   - Uses CVProfile for personalisation
+   - Returns a coaching_letter that references the PostgreSQL/Tableau experience
+3. UI shows the final report to the user
 
 ---
 
-## 7. Knowledge base struktura
+## 7. Knowledge base structure
 
-**129 pitanja** u 3 aktivna JSONL fajla:
+**129 questions** in 3 active JSONL files under `data/`:
 
-| Fajl | # pitanja | Sadržaj |
-|------|-----------|---------|
-| `questions_da_qa.jsonl` | 60 | 30 Data Analyst + 30 QA Engineer, 10 po (rola × težina) |
-| `questions_de_fe.jsonl` | 60 | 30 Data Engineer + 30 Frontend, 10 po (rola × težina) |
-| `questions_behavioural.jsonl` | 9 | STAR pitanja, 3 po težini, role-agnostic |
+| File                              | # questions | Content                                              |
+|-----------------------------------|-------------|------------------------------------------------------|
+| `questions_da_qa.jsonl`           | 60          | 30 Data Analyst + 30 QA Engineer, 10 per (role × difficulty) |
+| `questions_de_fe.jsonl`           | 60          | 30 Data Engineer + 30 Frontend Developer, 10 per (role × difficulty) |
+| `questions_behavioural.jsonl`     |  9          | STAR questions, 3 per difficulty, role-agnostic       |
 
-Svako pitanje ima:
+Every question has:
 
 ```json
 {
@@ -341,76 +350,55 @@ Svako pitanje ima:
 }
 ```
 
-**`skill_tags`** je ključno polje za CV-aware rerangiranje — to su konkretni alati / koncepti koji se mogu pojaviti u CV-ju.
+**`skill_tags`** is the key field for CV-aware reranking — concrete tools /
+concepts that can appear in a CV.
 
 ---
 
-## 8. Kako se pokreće lokalno
+## 8. Running locally
 
 ```bash
-# 1. Kloniraj repo, uđi u simple/ folder
+# 1. Clone the repo, cd into simple/
 cd interview-prep-coach/simple
 
-# 2. Napravi virtualenv (preporučeno)
+# 2. Create a virtualenv (recommended)
 python -m venv venv
-source venv/bin/activate    # Mac/Linux
+source venv/bin/activate    # Mac / Linux
 # venv\Scripts\activate     # Windows
 
-# 3. Instaliraj zavisnosti
+# 3. Install dependencies
 pip install -r requirements.txt
 
-# 4. Setup .env sa Anthropic API ključem
+# 4. Set up .env with the Anthropic API key
 cp .env.example .env
-# uredi .env i upiši svoj ANTHROPIC_API_KEY
+# edit .env and paste your ANTHROPIC_API_KEY
 
-# 5. Pokreni Streamlit
+# 5. Run Streamlit
 streamlit run app.py
 ```
 
-Bot otvara browser na `http://localhost:8501`.
+The bot opens the browser at `http://localhost:8501`.
 
 ---
 
-## 9. Trenutni status implementacije
+## 9. Why this architecture
 
-| Korak | Fajl | Linije | Status |
-|-------|------|--------|--------|
-| 0 | Skill tags na 149 pitanja | — | ✓ |
-| 1 | `core/models.py` | 210 | ✓ |
-| 2 | `core/llm.py` | 140 | ✓ |
-| 3 | `core/kb.py` | 293 | ✓ |
-| 4 | `core/agents.py` | 381 | ✓ |
-| 5 | `core/cv_parser.py` | 175 | ✓ |
-| 6 | `core/planner.py` | 174 | ✓ |
-| 7 | `app.py` | ~300 | sledeće |
-| 8 | `requirements.txt`, `.env.example`, README | — | sledeće |
+**Why no LangChain?** Fewer dependencies (~5MB vs ~50MB), no magic, easier to
+explain to the committee. Our use case does not need multi-provider routing.
 
-Ukupno ~1370 linija koda do sada, plus ~300 za UI = **~1700 linija ukupno**.
+**Why no chunking?** Each Question is an atomic unit, short enough to fit
+into one embedding.
 
----
+**Why no Telegram bot?** Streamlit is simpler, no ConversationHandler state
+machine, easier demo (`streamlit run app.py`).
 
-## 10. Šta dolazi sledeće (Korak 7)
+**Why no SQLite persistence?** Streamlit `session_state` is enough for the
+demo. Not a production app.
 
-Streamlit UI koji povezuje sve komponente. Tri ekrana:
+**Why a deterministic planner instead of an LLM Planner?** Predictable,
+easier to explain, cheaper. The adaptivity comes from the Reinforce slots
+plus the Director agent.
 
-1. **Setup screen** — role/difficulty/CV upload + "Start" dugme
-2. **Interview screen** — chat history + chat input, jedno pitanje po pitanje
-3. **Final report screen** — overall score + per-topic breakdown + coaching letter
-
-Sve stanje u `st.session_state["interview_state"]` (Pydantic SessionState).
-
----
-
-## Appendix: zašto baš ova arhitektura
-
-**Zašto bez LangChain-a?** Manje deps-a (~5MB vs ~50MB), bez magije, lakše objasniti komisiji. Naš use case ne traži multi-provider routing.
-
-**Zašto bez chunking-a?** Svaka Question je atomska jedinica, dovoljno kratka da stane u jedan embedding.
-
-**Zašto bez Telegram bot-a?** Streamlit je jednostavniji, ne traži ConversationHandler state machine, demo je lakši (`streamlit run app.py`).
-
-**Zašto bez SQLite persistencije?** Streamlit `session_state` je dovoljan za demo. Nije production app.
-
-**Zašto deterministički Planner umesto LLM Planner-a?** Predvidiv, lakši za objašnjenje, jeftiniji. Adaptivnost dolazi kroz Reinforce slotove + Director agent.
-
-**Zašto 4 odvojena agenta umesto jednog "mega-agenta"?** Svaki ima jasnu odgovornost, lakši test, jasno objasniti pred komisijom. Single responsibility principle za agente.
+**Why 4 separate agents instead of one "mega-agent"?** Each has a clear
+responsibility, easier to test, easier to explain to the committee. Single
+responsibility principle for agents.
