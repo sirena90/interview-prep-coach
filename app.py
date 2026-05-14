@@ -369,14 +369,15 @@ def _commit_turn(user_answer: str, score_report: ScoreReport) -> None:
 
 
 def _format_feedback(report: ScoreReport) -> str:
-    bullets = "\n".join(f"- {b}" for b in report.actionable_feedback)
+    """Compact one-glance feedback: overall + per-dim inline, brief comments, tips joined."""
+    tips = "; ".join(report.actionable_feedback)
     return (
-        "**📝 Feedback**\n\n"
-        f"- **Content:**   {report.content.score}/5 — {report.content.comment}\n"
-        f"- **Clarity:**   {report.clarity.score}/5 — {report.clarity.comment}\n"
-        f"- **Structure:** {report.structure.score}/5 — {report.structure.comment}\n\n"
-        f"**Overall:** {report.overall}/5\n\n"
-        f"**Things to improve:**\n{bullets}"
+        f"**{report.overall}/5 overall** — content {report.content.score}, "
+        f"clarity {report.clarity.score}, structure {report.structure.score}\n\n"
+        f"- Content: {report.content.comment}\n"
+        f"- Clarity: {report.clarity.comment}\n"
+        f"- Structure: {report.structure.comment}\n\n"
+        f"**Improve:** {tips}"
     )
 
 
