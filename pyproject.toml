@@ -1,0 +1,15 @@
+[project]
+name = "interview-prep-coach"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "streamlit>=1.28.0",
+    "anthropic>=0.39.0",
+    "chromadb>=0.5.0",
+    "pydantic>=2.0.0",
+    "pypdf>=4.0.0",
+    "python-dotenv>=1.0.0",
+]
+
+[dependency-groups]
+dev = ["ruff"]

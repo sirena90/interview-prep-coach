@@ -32,13 +32,15 @@ to the next planned slot (`move_on`).
 ### 1. Dependencies
 
 ```bash
-# Create a virtualenv (recommended)
-python -m venv .venv
+# Install uv if you don't have it
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Install all dependencies (creates .venv automatically)
+uv sync --group dev
+
+# Activate virtualenv
 source .venv/bin/activate    # Mac / Linux
 # .venv\Scripts\activate     # Windows
-
-# Install
-pip install -r requirements.txt
 ```
 
 ### 2. API key
@@ -67,7 +69,7 @@ locally to `logs/llm_calls.jsonl`.
 ### 3. Run
 
 ```bash
-streamlit run app.py
+uv run streamlit run app.py
 ```
 
 The browser opens automatically at `http://localhost:8501`.
@@ -154,13 +156,19 @@ Tests live in `tests/` (pytest) and `evals/` (eval pipeline). See
 [`TESTING.md`](TESTING.md) for the full guide.
 
 ```bash
-pip install -r requirements-dev.txt      # install pytest
+# Lint and format
+uv run ruff check .
+uv run ruff format .
 
-pytest                # 108 fast tests, no API calls, no cost
-pytest -m integration # + 7 KB tests (builds the Chroma index)
+# Install all dependencies (creates .venv automatically)
+uv sync --group dev
 
-python -m evals.run_evals             # planner + retriever evals (free)
-python -m evals.calibrate_evaluator   # Evaluator v1 vs v2 (paid)
+uv run pytest                # 108 fast tests, no API calls, no cost
+uv run pytest -m integration # + 7 KB tests (builds the Chroma index)
+
+uv run python -m evals.run_evals             # planner + retriever evals (free)
+uv run python -m evals.calibrate_evaluator   # Evaluator v1 vs v2 (paid)
+
 ```
 
 ## License
