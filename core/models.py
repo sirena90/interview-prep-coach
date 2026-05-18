@@ -146,6 +146,19 @@ class ScoreReport(BaseModel):
         return (self.overall - 1) / 4.0
 
 
+class CriterionJudgement(BaseModel):
+    """One per-criterion judge's output in the v2 (split) Evaluator.
+
+    The v2 Evaluator grades content / clarity / structure with three separate
+    focused prompts ("one criterion per judge") and combines them in code.
+    `comment` is listed before `score` on purpose: it asks the model to reason
+    before committing to a number, which makes the verdict auditable.
+    """
+    comment: str
+    score: conint(ge=1, le=5)
+    improvement: str
+
+
 class InterviewerChoice(BaseModel):
     """Interviewer agent output: which candidate was picked + phrasing."""
     id: str

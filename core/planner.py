@@ -22,9 +22,10 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
-from core.kb import KnowledgeBase
+if TYPE_CHECKING:
+    from core.kb import KnowledgeBase
 from core.models import (
     Difficulty,
     SessionState,

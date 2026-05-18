@@ -20,6 +20,17 @@ chroma.sqlite3
 # Streamlit cache
 .streamlit/
 
+# Claude Code worktrees / local agent state — never commit
+.claude/
+
+# Observability — local LLM call log (auto-regenerates)
+logs/
+
+# Test / coverage artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+
 # Editor / OS junk
 .idea/
 .vscode/
