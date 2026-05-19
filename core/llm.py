@@ -360,8 +360,9 @@ def call_llm(
             "output_tokens": output_tokens,
         })
 
-# ---- Tool use API --------------------------------------------------------
+# ---- Tool use API ----------------------------------------------------------
 
+@traceable(name="call_llm_with_tools")
 def call_llm_with_tools(
     *,
     system: str,
@@ -369,9 +370,9 @@ def call_llm_with_tools(
     schema: Type[T],
     tools: list[dict],
     tool_executor: Callable[[str, dict], str],
-    model: str = DEFAULT_MODEL,
-    max_tokens: int = DEFAULT_MAX_TOKENS,
-    temperature: float = DEFAULT_TEMPERATURE,
+    model: str | None = None,
+    max_tokens: int | None = None,
+    temperature: float | None = None,
     max_iterations: int = 8,
 ) -> T:
     """Run a tool-use loop with the LLM and return a validated Pydantic object.
@@ -391,7 +392,20 @@ def call_llm_with_tools(
     Returns:
         An instance of `schema` populated from the model's final JSON output.
     """
-    client = _get_client()
+    model = model or settings.active_model
+    max_tokens = max_tokens or settings.default_max_tokens
+    temperature = temperature if temperature is not None else settings.default_temperature
+
+    # The tool-use loop below is built on Anthropic's tools API. For other
+    # providers (no tool-use wired up) fall back to a plain call so the caller
+    # still gets a valid result.
+    if settings.active_provider != "anthropic":
+        return call_llm(
+            system=system, user=user, schema=schema,
+            model=model, max_tokens=max_tokens, temperature=temperature,
+        )
+
+    client = _get_anthropic()
     messages: list[dict] = [{"role": "user", "content": user}]
 
     for _ in range(max_iterations):
