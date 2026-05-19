@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 from typing import Optional
 
-from core.llm import call_llm
+from core.llm import call_llm, call_llm_with_tools
 from core.models import (
     CVProfile,
     DirectorChoice,
@@ -258,7 +258,18 @@ give clean generic advice — do NOT force a CV reference.
 
 Cite specific turns by their number when discussing strengths/gaps.
 
-You MUST return JSON matching this exact schema (no prose, no code fences):
+TOOL USE:
+You have access to a `lookup_reference_answer` tool. Use it sparingly and intentionally:
+- Call it for 1-3 questions where the candidate scored low (overall <= 3) and a precise
+  study suggestion would benefit from the gold reference.
+- Do NOT look up every question — only the ones where the reference will sharpen your
+  advice. If the candidate scored high on a question, skip it.
+- After looking up, base your study suggestion on what's actually in the reference, not
+  on guesses.
+
+When you are done using tools, emit your final JSON answer.
+
+You MUST eventually return JSON matching this exact schema (no prose, no code fences):
 {schema}
 """
 
@@ -284,12 +295,46 @@ Write the SessionSummary:
 - coaching_letter: 3-5 sentences, personalised, references CV experience"""
 
 
-class CoachingSummariserAgent:
-    """Writes a personalised final report. Generative agent #2.
+# Tools available to the Coaching Summariser agent
+COACH_TOOLS = [
+    {
+        "name": "lookup_reference_answer",
+        "description": (
+            "Look up the gold/reference answer for a question by ID. Use this when "
+            "you want to give specific, accurate study advice for a question the "
+            "candidate missed or scored low on. The question IDs are shown in the "
+            "per-turn breakdown (e.g. 'da-001', 'qa-003', 'behav-002')."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "question_id": {
+                    "type": "string",
+                    "description": "The question ID, e.g. 'da-001'.",
+                }
+            },
+            "required": ["question_id"],
+        },
+    }
+]
 
-    This is a second agentic pattern alongside Director: instead of action selection
-    in a loop, this agent synthesises long-form personalised content from rich context.
+
+class CoachingSummariserAgent:
+    """Writes a personalised final report. Tool-using agent #2.
+
+    Two agentic patterns demonstrated by the system:
+      - Conversation Director  — action selection in a closed loop
+      - Coaching Summariser   — tool use to fetch gold-standard answers for
+        questions the candidate scored low on, so study suggestions are grounded
+        in the actual KB content rather than the model's parametric memory.
     """
+
+    def __init__(self, kb=None) -> None:
+        """Optional KB reference; needed for the lookup_reference_answer tool.
+
+        If kb is None, the agent falls back to a plain (non-tool) call.
+        """
+        self._kb = kb
 
     def summarise(self, session_state: SessionState) -> SessionSummary:
         turns_summary = _format_turns(session_state.turns)
@@ -307,13 +352,46 @@ class CoachingSummariserAgent:
             topic_scores=topic_scores,
             cv_summary=cv_summary,
         )
-        # Higher max_tokens for the coaching letter; slightly warmer for natural prose.
-        return call_llm(
+
+        # No KB available -> plain call (backward-compatible fallback)
+        if self._kb is None:
+            return call_llm(
+                system=system,
+                user=user,
+                schema=SessionSummary,
+                max_tokens=2048,
+                temperature=0.3,
+            )
+
+        # Tool-use loop: the agent decides whether to look up reference answers
+        kb = self._kb
+
+        def tool_executor(tool_name: str, tool_input: dict) -> str:
+            if tool_name == "lookup_reference_answer":
+                qid = tool_input.get("question_id", "").strip()
+                if not qid:
+                    return "Error: question_id is required."
+                try:
+                    q = kb.get(qid)
+                except KeyError:
+                    return f"No question found with id '{qid}'."
+                return (
+                    f"Question (id={q.id}, topic={q.topic.value}, "
+                    f"difficulty={q.difficulty.value}):\n"
+                    f"{q.question}\n\n"
+                    f"Reference answer:\n{q.reference_answer}"
+                )
+            return f"Unknown tool: {tool_name}"
+
+        return call_llm_with_tools(
             system=system,
             user=user,
             schema=SessionSummary,
+            tools=COACH_TOOLS,
+            tool_executor=tool_executor,
             max_tokens=2048,
             temperature=0.3,
+            max_iterations=8,
         )
 
 

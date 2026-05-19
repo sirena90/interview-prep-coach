@@ -65,12 +65,17 @@ def get_kb() -> KnowledgeBase:
 
 @st.cache_resource
 def get_agents() -> dict:
-    """Instantiate agents once per session (they're stateless)."""
+    """Instantiate agents once per session.
+
+    Coach receives the KB so it can use the lookup_reference_answer tool
+    to fetch gold-standard answers for questions the candidate missed.
+    """
+    kb = get_kb()
     return {
         "interviewer": InterviewerAgent(),
         "evaluator": EvaluatorAgent(),
         "director": ConversationDirectorAgent(),
-        "coach": CoachingSummariserAgent(),
+        "coach": CoachingSummariserAgent(kb=kb),
     }
 
 
