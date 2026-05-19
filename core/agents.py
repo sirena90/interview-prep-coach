@@ -17,9 +17,11 @@ from __future__ import annotations
 import json
 from typing import Optional
 
-from core.llm import call_llm, call_llm_with_tools
+from core.llm import call_llm, call_llm_with_tools, traceable
 from core.models import (
+    CriterionJudgement,
     CVProfile,
+    DimensionScore,
     DirectorChoice,
     Difficulty,
     InterviewerChoice,
@@ -45,7 +47,11 @@ You will receive a list of candidate questions from the knowledge base. Your job
 3. If the candidate's CV mentions a project or skill that naturally connects to the question,
    reference it in your phrasing. Do NOT force a connection where none exists.
 
-You MUST return JSON matching this exact schema (no prose, no code fences):
+Return ONLY a JSON object filled in with real values that satisfy the schema
+below. Do NOT return the schema definition itself — return actual data.
+No prose, no code fences.
+
+JSON schema the object must satisfy:
 {schema}
 """
 
@@ -66,6 +72,7 @@ genuinely fits."""
 class InterviewerAgent:
     """Picks one question from retrieved candidates and phrases it naturally."""
 
+    @traceable(name="InterviewerAgent.ask")
     def ask(
         self,
         *,
@@ -123,7 +130,11 @@ Scoring:
 
 Also write 2-3 actionable feedback bullets — concrete things the candidate could do to improve.
 
-You MUST return JSON matching this exact schema (no prose, no code fences):
+Return ONLY a JSON object filled in with real values that satisfy the schema
+below. Do NOT return the schema definition itself — return actual data.
+No prose, no code fences.
+
+JSON schema the object must satisfy:
 {schema}
 """
 
@@ -146,15 +157,87 @@ Candidate's answer:
 Grade strictly. Cite specific gaps in your comments. Write the JSON now."""
 
 
-class EvaluatorAgent:
-    """Grades a user answer against a question's rubric. Returns a ScoreReport."""
+# --- v2 prompts: one judge per criterion ------------------------------------
+# v1 grades content/clarity/structure in a single prompt. v2 splits them into
+# three focused prompts and combines the scores in code — less halo effect,
+# easier to calibrate. Both versions are kept so the eval leaderboard can
+# compare them side by side.
 
+_CRITERION_DEFS = {
+    "content": "Content = is the answer factually correct and complete?",
+    "clarity": "Clarity = is it explained in a clear, well-articulated way?",
+    "structure": "Structure = is it organised logically (e.g. definition, then example)?",
+}
+
+_SCORE_ANCHORS = """- 1: fails this dimension entirely
+- 2: weak — major gaps
+- 3: acceptable — meets the basics
+- 4: strong — only minor gaps
+- 5: excellent — fully satisfies the rubric"""
+
+CRITERION_JUDGE_SYSTEM = """You are an interview evaluator grading ONE specific dimension of a candidate's answer.
+
+You are grading: {criterion_name}
+{criterion_definition}
+
+Grade ONLY this dimension. Do not let other qualities of the answer raise or lower this score.
+
+Score scale (1-5):
+{score_anchors}
+
+Return ONLY a JSON object filled in with real values that satisfy the schema
+below. Do NOT return the schema definition itself — return actual data.
+No prose, no code fences.
+
+JSON schema the object must satisfy:
+{schema}
+"""
+
+CRITERION_JUDGE_USER = """Question: {question_text}
+
+Rubric criteria for {criterion_name}:
+{rubric_criteria}
+
+Reference answer (what a strong answer looks like):
+{reference_answer}
+
+Candidate's answer:
+{user_answer}
+
+Grade the {criterion_name} dimension only. Reason first in `comment`, then give the `score`,
+then one concrete `improvement` suggestion for this dimension."""
+
+
+class EvaluatorAgent:
+    """Grades a user answer against a question's rubric. Returns a ScoreReport.
+
+    Two grading strategies, selected at construction:
+      - "v1": one prompt grades all dimensions at once (original behaviour).
+      - "v2": one focused prompt per dimension, scores combined in code.
+    Keeping both lets the eval suite measure them side by side.
+    """
+
+    def __init__(self, version: str = "v1") -> None:
+        if version not in ("v1", "v2"):
+            raise ValueError(
+                f"EvaluatorAgent version must be 'v1' or 'v2', got {version!r}"
+            )
+        self.version = version
+
+    @traceable(name="EvaluatorAgent.evaluate")
     def evaluate(
         self,
         *,
         question: Question,
         user_answer: str,
     ) -> ScoreReport:
+        if self.version == "v2":
+            return self._evaluate_v2(question, user_answer)
+        return self._evaluate_v1(question, user_answer)
+
+    # ---- v1: single combined prompt ---------------------------------------
+
+    def _evaluate_v1(self, question: Question, user_answer: str) -> ScoreReport:
         system = EVALUATOR_SYSTEM.format(
             schema=json.dumps(ScoreReport.model_json_schema(), indent=2)
         )
@@ -167,6 +250,64 @@ class EvaluatorAgent:
             user_answer=user_answer.strip() or "(empty answer)",
         )
         return call_llm(system=system, user=user, schema=ScoreReport)
+
+    # ---- v2: one judge per criterion --------------------------------------
+
+    def _evaluate_v2(self, question: Question, user_answer: str) -> ScoreReport:
+        answer = user_answer.strip() or "(empty answer)"
+        rubric_by_criterion = {
+            "content": question.rubric.content,
+            "clarity": question.rubric.clarity,
+            "structure": question.rubric.structure,
+        }
+        judgements: dict[str, CriterionJudgement] = {}
+        for criterion in ("content", "clarity", "structure"):
+            judgements[criterion] = self._judge_one(
+                criterion=criterion,
+                question=question,
+                rubric_criteria=rubric_by_criterion[criterion],
+                answer=answer,
+            )
+
+        # Combine the three criterion scores in code: overall = rounded mean.
+        scores = [judgements[c].score for c in ("content", "clarity", "structure")]
+        overall = round(sum(scores) / len(scores))
+
+        return ScoreReport(
+            content=DimensionScore(score=judgements["content"].score,
+                                   comment=judgements["content"].comment),
+            clarity=DimensionScore(score=judgements["clarity"].score,
+                                   comment=judgements["clarity"].comment),
+            structure=DimensionScore(score=judgements["structure"].score,
+                                     comment=judgements["structure"].comment),
+            actionable_feedback=[judgements[c].improvement
+                                 for c in ("content", "clarity", "structure")],
+            overall=overall,
+        )
+
+    @traceable(name="EvaluatorAgent.judge_criterion")
+    def _judge_one(
+        self,
+        *,
+        criterion: str,
+        question: Question,
+        rubric_criteria: list[str],
+        answer: str,
+    ) -> CriterionJudgement:
+        system = CRITERION_JUDGE_SYSTEM.format(
+            criterion_name=criterion,
+            criterion_definition=_CRITERION_DEFS[criterion],
+            score_anchors=_SCORE_ANCHORS,
+            schema=json.dumps(CriterionJudgement.model_json_schema(), indent=2),
+        )
+        user = CRITERION_JUDGE_USER.format(
+            question_text=question.question,
+            criterion_name=criterion,
+            rubric_criteria=_bullets(rubric_criteria) or "(none)",
+            reference_answer=question.reference_answer,
+            user_answer=answer,
+        )
+        return call_llm(system=system, user=user, schema=CriterionJudgement)
 
 
 # ============================================================================
@@ -191,7 +332,11 @@ Loop guards:
 - If the candidate has already had 2 clarify/followup/dig_deeper turns on the SAME question, choose move_on.
 - Default to move_on unless one of the other actions clearly applies.
 
-You MUST return JSON matching this exact schema (no prose, no code fences):
+Return ONLY a JSON object filled in with real values that satisfy the schema
+below. Do NOT return the schema definition itself — return actual data.
+No prose, no code fences.
+
+JSON schema the object must satisfy:
 {schema}
 """
 
@@ -220,6 +365,7 @@ class ConversationDirectorAgent:
     feeds the choice back into the loop.
     """
 
+    @traceable(name="ConversationDirectorAgent.decide_next_action")
     def decide_next_action(
         self,
         *,
@@ -269,7 +415,11 @@ You have access to a `lookup_reference_answer` tool. Use it sparingly and intent
 
 When you are done using tools, emit your final JSON answer.
 
-You MUST eventually return JSON matching this exact schema (no prose, no code fences):
+Return ONLY a JSON object filled in with real values that satisfy the schema
+below. Do NOT return the schema definition itself — return actual data.
+No prose, no code fences.
+
+JSON schema the object must satisfy:
 {schema}
 """
 
@@ -305,7 +455,7 @@ COACH_TOOLS = [
             "candidate missed or scored low on. The question IDs are shown in the "
             "per-turn breakdown (e.g. 'da-001', 'qa-003', 'behav-002')."
         ),
-        "input_schema": {
+        "parameters": {
             "type": "object",
             "properties": {
                 "question_id": {
@@ -336,6 +486,7 @@ class CoachingSummariserAgent:
         """
         self._kb = kb
 
+    @traceable(name="CoachingSummariserAgent.summarise")
     def summarise(self, session_state: SessionState) -> SessionSummary:
         turns_summary = _format_turns(session_state.turns)
         topic_scores = _format_topic_scores(session_state)

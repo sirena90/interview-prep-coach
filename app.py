@@ -28,6 +28,7 @@ from core.agents import (
 )
 from core.cv_parser import extract_cv_text, parse_cv
 from core.kb import KnowledgeBase
+from core.llm import set_retry_notifier
 from core.models import (
     CVProfile,
     DirectorAction,
@@ -44,6 +45,10 @@ from core.planner import SimplePlanner, TurnPlan
 
 
 load_dotenv()
+
+# Show a toast in the UI whenever an LLM call is being retried after a rate
+# limit, so a free-tier limit looks like a brief wait, not a frozen app.
+set_retry_notifier(lambda message: st.toast(message))
 
 
 # ============================================================================
@@ -450,14 +455,19 @@ def main() -> None:
     init_app_state()
     phase = st.session_state.phase
 
-    if phase == "setup":
-        render_setup()
-    elif phase == "interview":
-        render_interview()
-    elif phase == "done":
-        render_final()
-    else:
-        st.error(f"Unknown phase: {phase}")
+    try:
+        if phase == "setup":
+            render_setup()
+        elif phase == "interview":
+            render_interview()
+        elif phase == "done":
+            render_final()
+        else:
+            st.error(f"Unknown phase: {phase}")
+    except RuntimeError as exc:
+        # Raised when the LLM provider keeps rate-limiting after all retries,
+        # or when a provider is misconfigured. Show the message, not a crash.
+        st.error(str(exc))
 
 
 if __name__ == "__main__":

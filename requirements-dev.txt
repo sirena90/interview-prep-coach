@@ -1,0 +1,5 @@
+# Dev / test dependencies — not needed to run the app, only to test it.
+# Install with:  pip install -r requirements-dev.txt
+
+pytest>=8.0.0
+pytest-cov>=5.0.0

@@ -55,7 +55,11 @@ Read the CV text below and extract a structured profile. Be conservative:
 
 If the CV is sparse or unclear, return what you can — do not invent.
 
-You MUST return JSON matching this exact schema (no prose, no code fences):
+Return ONLY a JSON object filled in with real values that satisfy the schema
+below. Do NOT return the schema definition itself — return actual data.
+No prose, no code fences.
+
+JSON schema the object must satisfy:
 {schema}
 """
 
