@@ -5,6 +5,7 @@ auto-detection, fence stripping, token-usage normalisation, the JSONL
 observability log, and provider routing.
 """
 import json
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
@@ -13,6 +14,30 @@ import core.llm as llm_mod
 from core.config import Settings, settings
 from core.llm import _strip_fences, _usage_tokens
 from core.models import DimensionScore
+
+
+def _fake_openai_client(messages):
+    """Fake OpenAI client: chat.completions.create() returns the given
+    message objects, one per call, wrapped in the response shape."""
+    it = iter(messages)
+
+    def create(**_kwargs):
+        return SimpleNamespace(choices=[SimpleNamespace(message=next(it))])
+
+    return SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+
+
+def _fake_anthropic_client(responses):
+    """Fake Anthropic client: messages.create() returns the given response
+    objects, one per call."""
+    it = iter(responses)
+
+    def create(**_kwargs):
+        return next(it)
+
+    return SimpleNamespace(messages=SimpleNamespace(create=create))
 
 
 class TestProviderDetection:
@@ -257,3 +282,100 @@ class TestToolUse:
         )
         assert seen["ran"] is True
         assert result == "RESULT"
+
+    def test_openai_loop_runs_tool_then_returns_final_answer(self):
+        tool_call = SimpleNamespace(
+            id="c1",
+            function=SimpleNamespace(name="lookup", arguments='{"q": "x"}'),
+        )
+        round1 = SimpleNamespace(content=None, tool_calls=[tool_call])
+        round2 = SimpleNamespace(content='{"score": 4, "comment": "done"}',
+                                 tool_calls=None)
+        client = _fake_openai_client([round1, round2])
+
+        executed = []
+
+        def tool_executor(name, args):
+            executed.append((name, args))
+            return "tool result"
+
+        result = llm_mod._tool_loop_openai(
+            client, "sys", "usr", DimensionScore, self._NEUTRAL, tool_executor,
+            "model", 100, 0.0, 8,
+        )
+        assert executed == [("lookup", {"q": "x"})]
+        assert result.score == 4 and result.comment == "done"
+
+    def test_anthropic_loop_runs_tool_then_returns_final_answer(self):
+        tool_block = SimpleNamespace(type="tool_use", name="lookup",
+                                     input={"q": "x"}, id="tu1")
+        round1 = SimpleNamespace(stop_reason="tool_use", content=[tool_block])
+        text_block = SimpleNamespace(type="text",
+                                     text='{"score": 5, "comment": "great"}')
+        round2 = SimpleNamespace(stop_reason="end_turn", content=[text_block])
+        client = _fake_anthropic_client([round1, round2])
+
+        executed = []
+
+        def tool_executor(name, args):
+            executed.append((name, args))
+            return "reference answer"
+
+        result = llm_mod._tool_loop_anthropic(
+            client, "sys", "usr", DimensionScore, self._NEUTRAL, tool_executor,
+            "model", 100, 0.0, 8,
+        )
+        assert executed == [("lookup", {"q": "x"})]
+        assert result.score == 5
+
+    def test_tool_loop_raises_when_iterations_exhausted(self):
+        # A client that always asks for a tool -> the loop never finishes.
+        tool_block = SimpleNamespace(type="tool_use", name="lookup",
+                                     input={}, id="t")
+
+        def create(**_kwargs):
+            return SimpleNamespace(stop_reason="tool_use", content=[tool_block])
+
+        client = SimpleNamespace(messages=SimpleNamespace(create=create))
+        with pytest.raises(RuntimeError, match="exceeded"):
+            llm_mod._tool_loop_anthropic(
+                client, "s", "u", DimensionScore, self._NEUTRAL,
+                lambda n, a: "r", "m", 100, 0.0, 2,
+            )
+
+
+class TestCallLlmErrorPaths:
+    def test_repairs_malformed_json(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(llm_mod, "_LOG_PATH", tmp_path / "calls.jsonl")
+        calls = {"n": 0}
+
+        def fake(*_args):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return ("this is not json at all", None)
+            return ('{"score": 3, "comment": "fixed"}', None)
+
+        monkeypatch.setattr(llm_mod, "_DISPATCH", {settings.active_provider: fake})
+
+        result = llm_mod.call_llm(system="s", user="u", schema=DimensionScore)
+        assert result.score == 3
+        assert calls["n"] == 2  # initial call + one repair retry
+
+        record = json.loads(
+            (tmp_path / "calls.jsonl").read_text(encoding="utf-8").splitlines()[-1]
+        )
+        assert record["status"] == "repaired"
+
+    def test_logs_failed_status_when_repair_also_fails(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(llm_mod, "_LOG_PATH", tmp_path / "calls.jsonl")
+        monkeypatch.setattr(
+            llm_mod, "_DISPATCH",
+            {settings.active_provider: lambda *a: ("still not json", None)},
+        )
+        with pytest.raises(Exception):
+            llm_mod.call_llm(system="s", user="u", schema=DimensionScore)
+
+        record = json.loads(
+            (tmp_path / "calls.jsonl").read_text(encoding="utf-8").splitlines()[-1]
+        )
+        assert record["status"] == "failed"

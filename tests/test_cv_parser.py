@@ -54,3 +54,23 @@ class TestParseCv:
         prompt = fake_llm.calls[0].user
         assert "Senior Tableau analyst" in prompt
         assert Role.DATA_ANALYST.value in prompt
+
+
+class TestExtractCvFromPdf:
+    def test_garbage_pdf_bytes_raise_valueerror(self):
+        # Starts with the %PDF magic bytes but is not a real PDF.
+        with pytest.raises(ValueError):
+            extract_cv_text(b"%PDF-1.4 this is not actually a valid pdf file")
+
+    def test_pdf_with_no_extractable_text_raises_valueerror(self):
+        # A valid but blank PDF — pypdf opens it, but there is no text.
+        from io import BytesIO
+        from pypdf import PdfWriter
+
+        writer = PdfWriter()
+        writer.add_blank_page(width=200, height=200)
+        buf = BytesIO()
+        writer.write(buf)
+
+        with pytest.raises(ValueError):
+            extract_cv_text(buf.getvalue())

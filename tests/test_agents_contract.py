@@ -186,3 +186,55 @@ class TestCoachingSummariser:
 
         assert result is summary
         assert "Tableau" in fake_llm.calls[0].user
+
+
+class TestCoachingSummariserKbPath:
+    """With a kb, the summariser takes the tool-use path (call_llm_with_tools)."""
+
+    def test_with_kb_routes_through_tool_use_and_executor_works(
+        self, monkeypatch, make_session, make_turn, make_cv, make_question
+    ):
+        import core.agents as agents_mod
+
+        reference_q = make_question(qid="da-001")
+
+        class FakeKB:
+            def get(self, qid):
+                if qid == "da-001":
+                    return reference_q
+                raise KeyError(qid)
+
+        captured = {}
+
+        def fake_call_llm_with_tools(**kwargs):
+            captured["tools"] = kwargs["tools"]
+            captured["tool_executor"] = kwargs["tool_executor"]
+            return SessionSummary(
+                total_turns=1, overall_score=0.5, per_topic={},
+                strengths=["s"], gaps=["g"], study_suggestions=["x"],
+                coaching_letter="letter",
+            )
+
+        monkeypatch.setattr(agents_mod, "call_llm_with_tools",
+                            fake_call_llm_with_tools)
+
+        turns = [make_turn(1, SlotType.COVER, Topic.SQL, Difficulty.MID)]
+        session = make_session(turns=turns, cv_profile=make_cv())
+        result = CoachingSummariserAgent(kb=FakeKB()).summarise(session)
+
+        # routed through the tool path, carrying the coach's tools
+        assert isinstance(result, SessionSummary)
+        assert captured["tools"][0]["name"] == "lookup_reference_answer"
+
+        # the lookup_reference_answer executor behaves correctly
+        executor = captured["tool_executor"]
+        assert reference_q.reference_answer in executor(
+            "lookup_reference_answer", {"question_id": "da-001"}
+        )
+        assert "No question found" in executor(
+            "lookup_reference_answer", {"question_id": "missing"}
+        )
+        assert "required" in executor(
+            "lookup_reference_answer", {"question_id": ""}
+        )
+        assert "Unknown tool" in executor("some_other_tool", {})

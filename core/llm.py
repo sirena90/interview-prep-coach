@@ -204,15 +204,17 @@ def _retry_delay(exc: Exception, attempt: int) -> float:
     return min(_BASE_DELAY_SECONDS * (2 ** attempt), _MAX_DELAY_SECONDS)
 
 
-def _call_with_retry(fn, system, user, model, max_tokens, temperature):
-    """Run a provider call, retrying on rate-limit errors with backoff.
+def _retry_on_rate_limit(make_request):
+    """Run make_request() — a zero-arg provider call — retrying rate-limit
+    errors with exponential backoff. Used by every provider call: plain
+    completions and tool-use loops alike.
 
     Raises RuntimeError with a clear message if the provider keeps rate-
     limiting after _MAX_RETRIES attempts.
     """
     for attempt in range(_MAX_RETRIES + 1):
         try:
-            return fn(system, user, model, max_tokens, temperature)
+            return make_request()
         except _RATE_LIMIT_ERRORS as exc:
             if attempt == _MAX_RETRIES:
                 raise RuntimeError(
@@ -226,6 +228,13 @@ def _call_with_retry(fn, system, user, model, max_tokens, temperature):
                 f"then retrying (attempt {attempt + 1} of {_MAX_RETRIES})..."
             )
             time.sleep(delay)
+
+
+def _call_with_retry(fn, system, user, model, max_tokens, temperature):
+    """Rate-limit-retried wrapper for a plain provider call."""
+    return _retry_on_rate_limit(
+        lambda: fn(system, user, model, max_tokens, temperature)
+    )
 
 
 # ---- Helpers ---------------------------------------------------------------
@@ -404,10 +413,10 @@ def _tool_loop_anthropic(
     messages: list = [{"role": "user", "content": user}]
 
     for _ in range(max_iterations):
-        response = client.messages.create(
+        response = _retry_on_rate_limit(lambda: client.messages.create(
             model=model, max_tokens=max_tokens, temperature=temperature,
             system=system, tools=anthropic_tools, messages=messages,
-        )
+        ))
         if response.stop_reason == "tool_use":
             tool_results = []
             for block in response.content:
@@ -448,10 +457,10 @@ def _tool_loop_openai(
     ]
 
     for _ in range(max_iterations):
-        response = client.chat.completions.create(
+        response = _retry_on_rate_limit(lambda: client.chat.completions.create(
             model=model, max_tokens=max_tokens, temperature=temperature,
             tools=openai_tools, messages=messages,
-        )
+        ))
         message = response.choices[0].message
 
         if message.tool_calls:
