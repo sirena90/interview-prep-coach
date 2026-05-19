@@ -274,7 +274,6 @@ def _log_call(record: dict) -> None:
 
 # ---- Public API ------------------------------------------------------------
 
-@traceable(name="call_llm")
 def call_llm(
     *,
     system: str,
@@ -360,3 +359,82 @@ def call_llm(
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
         })
+
+# ---- Tool use API --------------------------------------------------------
+
+def call_llm_with_tools(
+    *,
+    system: str,
+    user: str,
+    schema: Type[T],
+    tools: list[dict],
+    tool_executor: Callable[[str, dict], str],
+    model: str = DEFAULT_MODEL,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
+    temperature: float = DEFAULT_TEMPERATURE,
+    max_iterations: int = 8,
+) -> T:
+    """Run a tool-use loop with the LLM and return a validated Pydantic object.
+
+    The model is given a set of tools it can call. When the model emits a
+    tool_use block, we execute the tool via `tool_executor(name, input_dict)`
+    and feed the result back. The loop ends when the model emits a final
+    text answer (no more tool_use) or when max_iterations is hit.
+
+    Args:
+        system, user:      prompts as in call_llm
+        schema:            Pydantic model class for the final answer
+        tools:             Anthropic tool specifications (list of dicts)
+        tool_executor:     function(tool_name, tool_input_dict) -> result string
+        max_iterations:    safety cap on tool-call rounds
+
+    Returns:
+        An instance of `schema` populated from the model's final JSON output.
+    """
+    client = _get_client()
+    messages: list[dict] = [{"role": "user", "content": user}]
+
+    for _ in range(max_iterations):
+        response = client.messages.create(
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            system=system,
+            tools=tools,
+            messages=messages,
+        )
+
+        if response.stop_reason == "tool_use":
+            # Execute every tool_use block in the response, collect results
+            tool_results = []
+            for block in response.content:
+                if getattr(block, "type", None) == "tool_use":
+                    try:
+                        result = tool_executor(block.name, dict(block.input))
+                    except Exception as e:
+                        result = f"Tool execution error: {e}"
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": result,
+                    })
+
+            # Append assistant's tool_use message and our tool_result reply
+            messages.append({"role": "assistant", "content": response.content})
+            messages.append({"role": "user", "content": tool_results})
+            continue
+
+        # Final answer — extract text, parse JSON, validate against schema
+        text_parts = [
+            b.text for b in response.content
+            if getattr(b, "type", None) == "text"
+        ]
+        raw = "\n".join(text_parts).strip()
+        cleaned = _strip_fences(raw)
+        data = json.loads(cleaned)
+        return schema.model_validate(data)
+
+    raise RuntimeError(
+        f"Tool-use loop exceeded {max_iterations} iterations without producing a final answer."
+    )
+
