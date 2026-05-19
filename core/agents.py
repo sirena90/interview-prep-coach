@@ -455,7 +455,7 @@ COACH_TOOLS = [
             "candidate missed or scored low on. The question IDs are shown in the "
             "per-turn breakdown (e.g. 'da-001', 'qa-003', 'behav-002')."
         ),
-        "input_schema": {
+        "parameters": {
             "type": "object",
             "properties": {
                 "question_id": {

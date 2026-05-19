@@ -361,6 +361,129 @@ def call_llm(
         })
 
 # ---- Tool use API ----------------------------------------------------------
+# Provider-agnostic tool use. Tools are declared in ONE neutral format:
+#     {"name": str, "description": str, "parameters": <JSON Schema dict>}
+# A per-provider adapter translates that into the provider's own tool format
+# and runs the tool-call loop. Adding a provider = add one adapter + one
+# entry in _TOOL_LOOPS; callers and tool specs never change.
+
+
+def _to_anthropic_tools(tools: list[dict]) -> list[dict]:
+    """Neutral tool specs -> Anthropic `tools` format."""
+    return [
+        {
+            "name": t["name"],
+            "description": t["description"],
+            "input_schema": t["parameters"],
+        }
+        for t in tools
+    ]
+
+
+def _to_openai_tools(tools: list[dict]) -> list[dict]:
+    """Neutral tool specs -> OpenAI `tools` format (also used for Mistral)."""
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": t["name"],
+                "description": t["description"],
+                "parameters": t["parameters"],
+            },
+        }
+        for t in tools
+    ]
+
+
+def _tool_loop_anthropic(
+    client, system, user, schema, tools, tool_executor,
+    model, max_tokens, temperature, max_iterations,
+):
+    """Tool-use loop on Anthropic's Messages API."""
+    anthropic_tools = _to_anthropic_tools(tools)
+    messages: list = [{"role": "user", "content": user}]
+
+    for _ in range(max_iterations):
+        response = client.messages.create(
+            model=model, max_tokens=max_tokens, temperature=temperature,
+            system=system, tools=anthropic_tools, messages=messages,
+        )
+        if response.stop_reason == "tool_use":
+            tool_results = []
+            for block in response.content:
+                if getattr(block, "type", None) == "tool_use":
+                    try:
+                        result = tool_executor(block.name, dict(block.input))
+                    except Exception as exc:
+                        result = f"Tool execution error: {exc}"
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": result,
+                    })
+            messages.append({"role": "assistant", "content": response.content})
+            messages.append({"role": "user", "content": tool_results})
+            continue
+
+        text = "\n".join(
+            b.text for b in response.content
+            if getattr(b, "type", None) == "text"
+        ).strip()
+        return schema.model_validate(json.loads(_strip_fences(text)))
+
+    raise RuntimeError(
+        f"Tool-use loop exceeded {max_iterations} iterations without a final answer."
+    )
+
+
+def _tool_loop_openai(
+    client, system, user, schema, tools, tool_executor,
+    model, max_tokens, temperature, max_iterations,
+):
+    """Tool-use loop on the OpenAI-compatible chat API (OpenAI and Mistral)."""
+    openai_tools = _to_openai_tools(tools)
+    messages: list = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+
+    for _ in range(max_iterations):
+        response = client.chat.completions.create(
+            model=model, max_tokens=max_tokens, temperature=temperature,
+            tools=openai_tools, messages=messages,
+        )
+        message = response.choices[0].message
+
+        if message.tool_calls:
+            messages.append(message)  # the assistant turn that requested tools
+            for call in message.tool_calls:
+                try:
+                    args = json.loads(call.function.arguments or "{}")
+                    result = tool_executor(call.function.name, args)
+                except Exception as exc:
+                    result = f"Tool execution error: {exc}"
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": call.id,
+                    "content": result,
+                })
+            continue
+
+        text = (message.content or "").strip()
+        return schema.model_validate(json.loads(_strip_fences(text)))
+
+    raise RuntimeError(
+        f"Tool-use loop exceeded {max_iterations} iterations without a final answer."
+    )
+
+
+# provider -> adapter that runs the tool-use loop for that provider
+_TOOL_LOOPS = {
+    "anthropic": lambda *a: _tool_loop_anthropic(_get_anthropic(), *a),
+    "openai":    lambda *a: _tool_loop_openai(_get_openai(), *a),
+    "mistral":   lambda *a: _tool_loop_openai(_get_mistral(), *a),
+}
+
 
 @traceable(name="call_llm_with_tools")
 def call_llm_with_tools(
@@ -375,80 +498,29 @@ def call_llm_with_tools(
     temperature: float | None = None,
     max_iterations: int = 8,
 ) -> T:
-    """Run a tool-use loop with the LLM and return a validated Pydantic object.
+    """Run a provider-agnostic tool-use loop and return a validated object.
 
-    The model is given a set of tools it can call. When the model emits a
-    tool_use block, we execute the tool via `tool_executor(name, input_dict)`
-    and feed the result back. The loop ends when the model emits a final
-    text answer (no more tool_use) or when max_iterations is hit.
+    The model is offered `tools` it can call; when it does, the call is run
+    via `tool_executor(name, args_dict)` and the result fed back. The loop
+    ends when the model returns a final answer or `max_iterations` is hit.
 
-    Args:
-        system, user:      prompts as in call_llm
-        schema:            Pydantic model class for the final answer
-        tools:             Anthropic tool specifications (list of dicts)
-        tool_executor:     function(tool_name, tool_input_dict) -> result string
-        max_iterations:    safety cap on tool-call rounds
+    `tools` uses ONE neutral format, translated per provider:
+        {"name": str, "description": str, "parameters": <JSON Schema dict>}
 
-    Returns:
-        An instance of `schema` populated from the model's final JSON output.
+    Provider, model, and defaults come from core.config.settings unless
+    overridden. Works with whichever provider .env selects (Anthropic /
+    OpenAI / Mistral) — the matching adapter is chosen automatically.
     """
     model = model or settings.active_model
     max_tokens = max_tokens or settings.default_max_tokens
     temperature = temperature if temperature is not None else settings.default_temperature
 
-    # The tool-use loop below is built on Anthropic's tools API. For other
-    # providers (no tool-use wired up) fall back to a plain call so the caller
-    # still gets a valid result.
-    if settings.active_provider != "anthropic":
-        return call_llm(
-            system=system, user=user, schema=schema,
-            model=model, max_tokens=max_tokens, temperature=temperature,
+    provider = settings.active_provider
+    loop = _TOOL_LOOPS.get(provider)
+    if loop is None:
+        raise ValueError(
+            f"Unknown provider '{provider}'. Choose from: {list(_TOOL_LOOPS)}"
         )
-
-    client = _get_anthropic()
-    messages: list[dict] = [{"role": "user", "content": user}]
-
-    for _ in range(max_iterations):
-        response = client.messages.create(
-            model=model,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            system=system,
-            tools=tools,
-            messages=messages,
-        )
-
-        if response.stop_reason == "tool_use":
-            # Execute every tool_use block in the response, collect results
-            tool_results = []
-            for block in response.content:
-                if getattr(block, "type", None) == "tool_use":
-                    try:
-                        result = tool_executor(block.name, dict(block.input))
-                    except Exception as e:
-                        result = f"Tool execution error: {e}"
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": result,
-                    })
-
-            # Append assistant's tool_use message and our tool_result reply
-            messages.append({"role": "assistant", "content": response.content})
-            messages.append({"role": "user", "content": tool_results})
-            continue
-
-        # Final answer — extract text, parse JSON, validate against schema
-        text_parts = [
-            b.text for b in response.content
-            if getattr(b, "type", None) == "text"
-        ]
-        raw = "\n".join(text_parts).strip()
-        cleaned = _strip_fences(raw)
-        data = json.loads(cleaned)
-        return schema.model_validate(data)
-
-    raise RuntimeError(
-        f"Tool-use loop exceeded {max_iterations} iterations without producing a final answer."
-    )
+    return loop(system, user, schema, tools, tool_executor,
+                model, max_tokens, temperature, max_iterations)
 

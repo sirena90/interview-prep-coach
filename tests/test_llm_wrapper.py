@@ -212,3 +212,48 @@ class TestRateLimitRetry:
 
         with pytest.raises(RuntimeError, match="rate-limiting"):
             llm_mod._call_with_retry(always_limited, "s", "u", "m", 10, 0.0)
+
+
+class TestToolUse:
+    """Provider-agnostic tool use: one neutral spec, per-provider adapters."""
+
+    _NEUTRAL = [{
+        "name": "lookup",
+        "description": "look something up",
+        "parameters": {
+            "type": "object",
+            "properties": {"q": {"type": "string"}},
+            "required": ["q"],
+        },
+    }]
+
+    def test_neutral_specs_translate_to_anthropic_format(self):
+        out = llm_mod._to_anthropic_tools(self._NEUTRAL)
+        assert out[0]["name"] == "lookup"
+        assert out[0]["input_schema"] == self._NEUTRAL[0]["parameters"]
+        assert "parameters" not in out[0]
+
+    def test_neutral_specs_translate_to_openai_format(self):
+        out = llm_mod._to_openai_tools(self._NEUTRAL)
+        assert out[0]["type"] == "function"
+        assert out[0]["function"]["name"] == "lookup"
+        assert out[0]["function"]["parameters"] == self._NEUTRAL[0]["parameters"]
+
+    def test_tool_loops_cover_all_three_providers(self):
+        assert set(llm_mod._TOOL_LOOPS) == {"anthropic", "openai", "mistral"}
+
+    def test_call_llm_with_tools_routes_to_the_active_provider(self, monkeypatch):
+        seen = {}
+
+        def fake_loop(system, user, schema, tools, tool_executor,
+                      model, max_tokens, temperature, max_iterations):
+            seen["ran"] = True
+            return "RESULT"
+
+        monkeypatch.setitem(llm_mod._TOOL_LOOPS, settings.active_provider, fake_loop)
+        result = llm_mod.call_llm_with_tools(
+            system="s", user="u", schema=DimensionScore,
+            tools=self._NEUTRAL, tool_executor=lambda name, args: "x",
+        )
+        assert seen["ran"] is True
+        assert result == "RESULT"
