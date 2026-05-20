@@ -23,9 +23,14 @@ Q4 — COVER       (a different fresh topic)
 Q5 — REINFORCE   (same topic as Q4, difficulty adapts to score)
 ```
 
-After each answer the **Conversation Director agent** decides whether to stay
-on the current question (`clarify` / `followup` / `dig_deeper`) or to move on
-to the next planned slot (`move_on`).
+After each answer the **Conversation Director agent** decides whether to
+stay on the current question (`clarify` / `followup` / `dig_deeper`) or
+to move on to the next planned slot (`move_on`). The Director is capped at
+**2 follow-up rounds per slot** so a single slot can't trap the session.
+
+For reinforce slots the difficulty adapts to the previous score: weak
+(< 0.4) → step down, strong (> 0.85) → step up, otherwise stay. Floored at
+ENTRY, capped at SENIOR.
 
 ## Quick start
 
@@ -84,14 +89,17 @@ The browser opens automatically at `http://localhost:8501`.
 ```
 app.py                       Streamlit UI (3 screens: setup, interview, final)
 ├── core/config.py           Multi-provider settings (auto-detect from .env)
-├── core/models.py           Pydantic schemas
+├── core/models.py           Pydantic schemas (16 models, dependency-free)
 ├── core/llm.py              Provider-agnostic LLM wrapper (Anthropic / OpenAI /
-│                            Mistral) with JSON validation, rate-limit retry,
-│                            LangSmith tracing, and a provider-agnostic
-│                            tool-use loop
-├── core/kb.py               KB loader + Chroma retriever (129 questions)
-├── core/cv_parser.py        PDF / text → CVProfile
-├── core/planner.py          Deterministic 5-slot scheduler
+│                            Mistral) with JSON validation, one-shot repair,
+│                            rate-limit retry with Retry-After honouring,
+│                            LangSmith tracing + offline logs/llm_calls.jsonl,
+│                            and a provider-agnostic tool-use loop
+├── core/kb.py               KB loader + Chroma retriever (129 questions,
+│                            metadata filter + semantic search + CV-aware
+│                            rerank + difficulty fallback)
+├── core/cv_parser.py        PDF / text → CVProfile (one LLM call)
+├── core/planner.py          Deterministic 5-slot scheduler (no LLM)
 └── core/agents.py           Four LLM agents:
                                - Interviewer (picks + paraphrases the question)
                                - Evaluator (grades against the rubric; v1/v2)
@@ -99,8 +107,8 @@ app.py                       Streamlit UI (3 screens: setup, interview, final)
                                - CoachingSummariser (final report, uses tools) ★
 ```
 
-★ = formally agentic component (action selection in a loop + generative
-personalisation).
+★ = formally agentic component (Director = action selection in a closed
+loop; Coach = tool use against the KB).
 
 See `ARCHITECTURE.md` for a detailed description of each component and the
 data flow.
@@ -156,12 +164,17 @@ Tests live in `tests/` (pytest) and `evals/` (eval pipeline). See
 ```bash
 pip install -r requirements-dev.txt      # install pytest
 
-pytest                # 108 fast tests, no API calls, no cost
+pytest                # 98 fast tests, no API calls, no cost
 pytest -m integration # + 7 KB tests (builds the Chroma index)
 
 python -m evals.run_evals             # planner + retriever evals (free)
-python -m evals.calibrate_evaluator   # Evaluator v1 vs v2 (paid)
+python -m evals.run_evals --director  # + Director agent (real API calls)
+python -m evals.calibrate_evaluator   # Evaluator v1 vs v2 (paid, ~96 calls)
+python -m evals.langsmith_experiment  # same calibration, pushed to LangSmith
 ```
+
+Each eval grader appends its score to a shared **leaderboard** so you can
+re-run after a change and compare versions side by side.
 
 ## License
 
