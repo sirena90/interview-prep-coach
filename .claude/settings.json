@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "jq -r '.tool_input.file_path // empty' | { read -r f; echo \"$f\" | grep -q '\\.py$' && uv run ruff check --fix --quiet \"$f\"; } 2>/dev/null || true",
+            "command": "command -v jq >/dev/null 2>&1 && jq -r '.tool_input.file_path // empty' 2>/dev/null | { read -r f; echo \"$f\" | grep -q '\\.py$' && uv run ruff check --fix --quiet \"$f\"; } 2>/dev/null || true",
             "statusMessage": "Linting with ruff..."
           }
         ]
