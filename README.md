@@ -1,7 +1,9 @@
 # Interview Prep Coach
 
 A multi-turn coaching chatbot for technical and behavioural interview prep.
-Powered by RAG over a curated question bank and four LLM agents (Anthropic Claude).
+Powered by RAG over a curated question bank and four LLM agents. Works with
+Anthropic Claude, OpenAI, or Mistral — the provider is auto-detected from
+whichever API key you put in `.env`.
 
 ## What it does
 
@@ -30,12 +32,10 @@ to the next planned slot (`move_on`).
 ### 1. Dependencies
 
 ```bash
-cd interview-prep-coach/simple
-
 # Create a virtualenv (recommended)
-python -m venv venv
-source venv/bin/activate    # Mac / Linux
-# venv\Scripts\activate     # Windows
+python -m venv .venv
+source .venv/bin/activate    # Mac / Linux
+# .venv\Scripts\activate     # Windows
 
 # Install
 pip install -r requirements.txt
@@ -43,17 +43,26 @@ pip install -r requirements.txt
 
 ### 2. API key
 
-You need an **Anthropic API key**. Sign up at
-[console.anthropic.com](https://console.anthropic.com/settings/keys),
-click "Create Key", and copy the key (it starts with `sk-ant-...`).
+The app supports **Anthropic Claude, OpenAI, and Mistral** — the active
+provider is auto-detected from whichever `*_API_KEY` is set in your `.env`:
+
+- `ANTHROPIC_API_KEY` → Anthropic Claude
+- `OPENAI_API_KEY` → OpenAI
+- `MISTRAL_API_KEY` → Mistral
+
+Get a key from your chosen provider, then:
 
 ```bash
 # Copy the template
 cp .env.example .env
 
-# Edit .env and paste your real key in place of the placeholder
-# ANTHROPIC_API_KEY=sk-ant-...
+# Edit .env and fill in ONE of the keys. If several are set, priority is
+# Anthropic > OpenAI > Mistral.
 ```
+
+Optional: set `LANGSMITH_API_KEY` + `LANGSMITH_TRACING=true` in `.env` to
+trace every LLM call in the LangSmith dashboard. Without it, calls still log
+locally to `logs/llm_calls.jsonl`.
 
 ### 3. Run
 
@@ -74,16 +83,20 @@ The browser opens automatically at `http://localhost:8501`.
 
 ```
 app.py                       Streamlit UI (3 screens: setup, interview, final)
-├── core/models.py           Pydantic schemas (16 models)
-├── core/llm.py              Thin Anthropic wrapper with JSON validation
+├── core/config.py           Multi-provider settings (auto-detect from .env)
+├── core/models.py           Pydantic schemas
+├── core/llm.py              Provider-agnostic LLM wrapper (Anthropic / OpenAI /
+│                            Mistral) with JSON validation, rate-limit retry,
+│                            LangSmith tracing, and a provider-agnostic
+│                            tool-use loop
 ├── core/kb.py               KB loader + Chroma retriever (129 questions)
 ├── core/cv_parser.py        PDF / text → CVProfile
 ├── core/planner.py          Deterministic 5-slot scheduler
 └── core/agents.py           Four LLM agents:
                                - Interviewer (picks + paraphrases the question)
-                               - Evaluator (grades against the rubric)
+                               - Evaluator (grades against the rubric; v1/v2)
                                - ConversationDirector (chooses the next action) ★
-                               - CoachingSummariser (final report) ★
+                               - CoachingSummariser (final report, uses tools) ★
 ```
 
 ★ = formally agentic component (action selection in a loop + generative
@@ -107,12 +120,13 @@ Every question has a topic, subtopic, difficulty, reference answer, a rubric
 
 ## Troubleshooting
 
-**`ANTHROPIC_API_KEY not set`** — make sure `.env` is in the `simple/`
-folder and contains your real key.
+**`No LLM API key set in .env`** — make sure `.env` is in the project root
+and contains at least one of `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or
+`MISTRAL_API_KEY`.
 
 **Chroma error on startup** — on first run, Chroma indexes all 129
 questions, which can take 10–20 seconds. The second run is instant (cache
-is at `simple/.chroma/`).
+is at `.chroma/`).
 
 **`pypdf` error on CV upload** — the CV must be a PDF with a text layer
 (exported from Word, LinkedIn, Google Docs). Scanned PDFs do not work.
@@ -123,18 +137,30 @@ version keeps state in memory, no SQLite. A refresh starts a new session.
 ## Technologies
 
 - **Streamlit** for the UI (single-file Python web app)
-- **Anthropic Claude** (`claude-sonnet-4-5`) for every LLM call
+- **Anthropic Claude / OpenAI / Mistral** — multi-provider, auto-detected
+  from the API key in `.env`
+- **pydantic-settings** for typed config (`core/config.py`)
 - **ChromaDB** for the vector store and semantic retrieval
 - **Pydantic** for type-safe data contracts
 - **pypdf** for PDF text extraction
-- **No LangChain** — direct Anthropic SDK for simplicity and transparency
+- **LangSmith** (optional) for tracing every LLM call, with a local
+  `logs/llm_calls.jsonl` fallback when no key is set
+- **No LangChain** — direct provider SDKs (Anthropic + OpenAI; Mistral uses
+  the OpenAI-compatible API)
 
 ## Development
 
-Run the tests (once they exist):
+Tests live in `tests/` (pytest) and `evals/` (eval pipeline). See
+[`TESTING.md`](TESTING.md) for the full guide.
 
 ```bash
-pytest tests/
+pip install -r requirements-dev.txt      # install pytest
+
+pytest                # 108 fast tests, no API calls, no cost
+pytest -m integration # + 7 KB tests (builds the Chroma index)
+
+python -m evals.run_evals             # planner + retriever evals (free)
+python -m evals.calibrate_evaluator   # Evaluator v1 vs v2 (paid)
 ```
 
 ## License
