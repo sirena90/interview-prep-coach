@@ -22,6 +22,7 @@ chroma.sqlite3
 
 # Claude Code worktrees / local agent state — never commit
 .claude/
+docs/superpowers/
 
 # Observability — local LLM call log (auto-regenerates)
 logs/

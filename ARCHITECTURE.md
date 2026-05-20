@@ -395,21 +395,25 @@ concepts that can appear in a CV.
 ## 8. Running locally
 
 ```bash
+# 1. Install uv (if not already installed)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
 # 1. Create a virtualenv (recommended)
-python -m venv .venv
-source .venv/bin/activate    # Mac / Linux
-# .venv\Scripts\activate     # Windows
+uv venv
 
 # 2. Install dependencies
-pip install -r requirements.txt
+uv sync --group dev
 
-# 3. Set up .env with ONE LLM API key (any of the three)
+# 3. Set up .env with the Anthropic API key
 cp .env.example .env
 # edit .env and set ANTHROPIC_API_KEY, OPENAI_API_KEY, or MISTRAL_API_KEY.
 # optional: LANGSMITH_API_KEY + LANGSMITH_TRACING=true to trace to LangSmith.
 
 # 4. Run Streamlit
-streamlit run app.py
+source .venv/bin/activate    # Mac / Linux
+# .venv\Scripts\activate     # Windows
+uv run streamlit run app.py
+
 ```
 
 The bot opens the browser at `http://localhost:8501`.
