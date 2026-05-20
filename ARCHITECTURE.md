@@ -28,35 +28,39 @@ concrete recommendations.
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                          STREAMLIT UI (app.py)                          │
-│  Setup → Q1 → Q2 → Q3 → Q4 → Q5 → Final Report                          │
-└───────┬─────────────────────────────────────────────────────────────────┘
-        │
-        │ session_state (Pydantic SessionState held in memory)
-        │
-        ↓
+│        Setup → Interview loop (Q1..Q5) → Final report                   │
+└────────────────────────────────┬────────────────────────────────────────┘
+                                 │ session_state (Pydantic SessionState)
+                                 ↓
 ┌──────────────────────┐  ┌─────────────────┐  ┌─────────────────────────┐
-│  Planner             │  │  KB / RAG       │  │  4 LLM Agents           │
+│  Planner             │  │  KB / RAG       │  │  5 LLM components       │
 │  (Python, no LLM)    │  │  (Chroma)       │  │                         │
-│                      │  │                 │  │  - Interviewer          │
-│  5-slot pattern:     │  │  129 questions  │  │  - Evaluator            │
-│  cover · reinforce · │  │  3 JSONL files  │  │  - Director ★           │
-│  behavioral · cover ·│  │  Vector search  │  │  - Coaching Summariser ★│
-│  reinforce           │  │  + metadata     │  │                         │
-└──────────────────────┘  └─────────────────┘  └─────────────────────────┘
-                                │
-                                ↓
-                        ┌──────────────┐
-                        │  CV Parser   │
-                        │  (LLM)       │
-                        │              │
-                        │  CV → profile│
-                        └──────────────┘
-                                │
-                                ↓
-                        ┌──────────────────┐
-                        │   LLM wrapper    │
-                        │ (multi-provider) │
-                        └──────────────────┘
+│                      │  │                 │  │  • CV Parser  (setup)   │
+│  5-slot pattern,     │  │  129 questions  │  │  • Interviewer          │
+│  difficulty          │  │  in 3 JSONL,    │  │  • Evaluator (v1 / v2)  │
+│  adaptation          │  │  CV-aware       │  │  • Director  ★          │
+│                      │  │  rerank         │  │  • Coach     ★ (tools)  │
+└──────────────────────┘  └─────────────────┘  └─────────────┬───────────┘
+                                                             │ every LLM call
+                                                             ↓
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                       core/llm.py   —   LLM wrapper                          │
+│                                                                              │
+│   call_llm()              — plain JSON-validated calls                       │
+│   call_llm_with_tools()   — provider-agnostic tool-use loop                  │
+│                                                                              │
+│   • per-provider routing   • rate-limit retry   • repair retry               │
+└─────┬──────────────────────────────────────────────────────────────────┬─────┘
+      │ provider                                                         │ trace
+      ↓                                                                  ↓
+┌──────────────────────────────┐                  ┌────────────────────────────┐
+│ Settings (core/config.py)    │                  │ Observability              │
+│                              │                  │                            │
+│ Provider auto-detected from  │                  │ • LangSmith (when set)     │
+│ the API key in .env:         │                  │ • logs/llm_calls.jsonl     │
+│  ANTHROPIC / OPENAI /        │                  │   (always on)              │
+│  MISTRAL                     │                  │                            │
+└──────────────────────────────┘                  └────────────────────────────┘
 ```
 
 **★** = formally agentic component (action selection in a loop + tool-using
