@@ -53,13 +53,13 @@ concrete recommendations.
                         └──────────────┘
                                 │
                                 ↓
-                        ┌──────────────┐
-                        │  LLM wrapper │
-                        │  (Anthropic) │
-                        └──────────────┘
+                        ┌──────────────────┐
+                        │   LLM wrapper    │
+                        │ (multi-provider) │
+                        └──────────────────┘
 ```
 
-**★** = formally agentic component (action selection in a loop + generative
+**★** = formally agentic component (action selection in a loop + tool-using
 personalisation). Everything else is deterministic Python or single-shot
 LLM calls.
 
@@ -129,25 +129,44 @@ All data structures. 16 models in 5 groups:
 Pydantic forces every agent to return valid JSON that maps onto type-safe
 Python objects.
 
-### 4.3 LLM wrapper (`core/llm.py`)
+### 4.3 Settings (`core/config.py`)
 
-A thin wrapper around the Anthropic API. One function:
+`pydantic-settings`-based config. The active LLM provider is **auto-
+detected** from whichever API key is set in `.env`:
+
+- `ANTHROPIC_API_KEY` → Anthropic
+- `OPENAI_API_KEY` → OpenAI
+- `MISTRAL_API_KEY` → Mistral
+
+Priority order when several keys are set: Anthropic > OpenAI > Mistral.
+Other settings (model overrides, generation defaults, data paths) also live
+here. Exposed via `from core.config import settings`.
+
+### 4.4 LLM wrapper (`core/llm.py`)
+
+Provider-agnostic wrapper. Every agent calls one function:
 
 ```python
 result = call_llm(system=SYSTEM_PROMPT, user=user_msg, schema=ScoreReport)
 ```
 
 What it does:
-- Calls `claude-sonnet-4-5-20250929`
-- Strips ```json fences if the model adds them
-- Parses JSON
-- Validates against the Pydantic schema
-- Retries once with a repair prompt if the first response doesn't parse
+- Routes the call to the active provider's SDK (Anthropic Messages API, or
+  the OpenAI-compatible chat API for OpenAI + Mistral).
+- Strips ```` ```json ```` fences if the model adds them, parses JSON, and
+  validates against the Pydantic schema.
+- Repairs once with a clearer prompt if the first response is malformed.
+- Retries on rate-limit errors with exponential backoff (honouring
+  `Retry-After`) and surfaces a toast in the UI on each retry.
+- Traces every call to LangSmith when `LANGSMITH_API_KEY` is configured;
+  also appends one JSON line per call to `logs/llm_calls.jsonl` regardless.
 
-Without this wrapper every agent would have to parse JSON and run retries
-manually — with the wrapper, each agent becomes a one-liner.
+It also exposes `call_llm_with_tools()` — a **provider-agnostic tool-use
+loop**. Tools are declared once in a neutral `{name, description, parameters}`
+format and translated to each provider's tool spec. The Coaching Summariser
+uses this to call `lookup_reference_answer` against the KB.
 
-### 4.4 Knowledge Base + Chroma (`core/kb.py`)
+### 4.5 Knowledge Base + Chroma (`core/kb.py`)
 
 At startup:
 - Loads the 3 JSONL files (questions_da_qa, questions_de_fe, questions_behavioural)
@@ -167,7 +186,7 @@ tagged `postgresql` get priority).
 - If there are no candidates at the requested difficulty → drops to an easier one
 - If still nothing → any difficulty within the topic
 
-### 4.5 Planner (`core/planner.py`)
+### 4.6 Planner (`core/planner.py`)
 
 Deterministic Python (NOT an LLM agent — deliberately, for predictability
 and explainability).
@@ -184,7 +203,7 @@ Rules:
 - Q2, Q5: REINFORCE → reuse the previous COVER's topic, adjust difficulty
 - Q3: BEHAVIORAL → always the behavioural topic
 
-### 4.6 Agents (`core/agents.py`)
+### 4.7 Agents (`core/agents.py`)
 
 Four LLM agents, each with one job:
 
@@ -199,6 +218,12 @@ Four LLM agents, each with one job:
 - **Input:** Question (with rubric, reference_answer) + user_answer
 - **Output:** `ScoreReport` (content / clarity / structure 1–5 + feedback bullets + overall)
 - **Job:** structured grading against the rubric
+- **Two modes** (selected at construction — `EvaluatorAgent(version="v1"|"v2")`):
+  - **v1** — one prompt grades all three dimensions at once (original).
+  - **v2** — one focused prompt per criterion, scores combined in code.
+    Reduces "halo effect" but costs ~3× the API calls. The `evals/`
+    pipeline measures which is better against a human-labelled golden set
+    using Cohen's kappa.
 
 #### ConversationDirectorAgent ★ AGENT #1
 - **Input:** Question + user_answer + ScoreReport + history
@@ -207,11 +232,17 @@ Four LLM agents, each with one job:
 - **Why this is "the real agent":** it picks an action from a fixed set based on observation, in a closed loop. That matches the formal definition of an agent.
 
 #### CoachingSummariserAgent ★ AGENT #2
-- **Input:** the full SessionState + CVProfile
+- **Input:** the full SessionState + CVProfile + the KB (for tool calls)
 - **Output:** `SessionSummary` including a coaching_letter
-- **Why this is also agentic:** generative personalisation — it synthesises long-form content from rich context, using the CV for concrete references.
+- **Why this is agentic:** **tool use.** The Coach is given a
+  `lookup_reference_answer(question_id)` tool and decides — autonomously —
+  for which questions to call it (typically the ones the candidate scored
+  low on) so that study suggestions are grounded in the actual gold
+  reference, not the model's parametric memory. Built on a provider-
+  agnostic tool-use loop (`call_llm_with_tools`), so it works with whichever
+  provider `.env` selects.
 
-### 4.7 CV Parser (`core/cv_parser.py`)
+### 4.8 CV Parser (`core/cv_parser.py`)
 
 Two functions:
 - `extract_cv_text(file)` — pulls text from a PDF (via `pypdf`) or a .txt file
@@ -239,22 +270,24 @@ Observation → Decision (from fixed action set) → Action → Loop
 The Director observes the ScoreReport, picks one of 4 actions, the action
 changes system state, and the loop repeats. Classic RL-style agent.
 
-### Pattern 2: Generative Personalisation (Coaching Summariser)
+### Pattern 2: Tool Use (Coaching Summariser)
 
 ```
-Rich context → Synthesis → Long-form personalised output
+Rich context → Decide which tools to call → Execute → Synthesise → Output
 ```
 
-The Coach takes the full session state plus the CV and synthesises coherent
-personalised text. This is an "agent" in the sense of autonomous creative
-synthesis.
+The Coach takes the full session state and the CV, then decides — on its
+own — which questions need a `lookup_reference_answer` call against the
+KB before writing the report. Study suggestions are grounded in the actual
+gold answer, not the model's parametric memory. The tool-use loop is
+provider-agnostic, so this works on Anthropic, OpenAI, or Mistral.
 
 **Plus 2 supporting LLM components:**
 - Interviewer (LLM-as-selector)
 - Evaluator (LLM-as-judge)
 - CV Parser (LLM-as-extractor)
 
-Total **5 LLM calls per session minimum** (1 CV parse + 5 × Evaluator + 5 × Director + 5 × Interviewer when there are multiple candidates + 1 Coach ≈ ~20 calls per session).
+Total **~20 LLM calls per session** (1 CV parse + 5 × Evaluator + 5 × Director + 5 × Interviewer when there are multiple candidates + 1 Coach + a small number of Coach tool-call rounds). The Evaluator's v2 mode adds 2 extra calls per turn.
 
 ---
 
@@ -358,22 +391,20 @@ concepts that can appear in a CV.
 ## 8. Running locally
 
 ```bash
-# 1. Clone the repo, cd into simple/
-cd interview-prep-coach/simple
+# 1. Create a virtualenv (recommended)
+python -m venv .venv
+source .venv/bin/activate    # Mac / Linux
+# .venv\Scripts\activate     # Windows
 
-# 2. Create a virtualenv (recommended)
-python -m venv venv
-source venv/bin/activate    # Mac / Linux
-# venv\Scripts\activate     # Windows
-
-# 3. Install dependencies
+# 2. Install dependencies
 pip install -r requirements.txt
 
-# 4. Set up .env with the Anthropic API key
+# 3. Set up .env with ONE LLM API key (any of the three)
 cp .env.example .env
-# edit .env and paste your ANTHROPIC_API_KEY
+# edit .env and set ANTHROPIC_API_KEY, OPENAI_API_KEY, or MISTRAL_API_KEY.
+# optional: LANGSMITH_API_KEY + LANGSMITH_TRACING=true to trace to LangSmith.
 
-# 5. Run Streamlit
+# 4. Run Streamlit
 streamlit run app.py
 ```
 
@@ -383,8 +414,9 @@ The bot opens the browser at `http://localhost:8501`.
 
 ## 9. Why this architecture
 
-**Why no LangChain?** Fewer dependencies (~5MB vs ~50MB), no magic, easier to
-explain to the committee. Our use case does not need multi-provider routing.
+**Why no LangChain?** Fewer dependencies, no magic, easier to explain.
+Multi-provider routing is ~30 lines in `core/llm.py` (`_DISPATCH`); the
+tool-use loop is another ~60 lines (`_TOOL_LOOPS`). No framework needed.
 
 **Why no chunking?** Each Question is an atomic unit, short enough to fit
 into one embedding.
@@ -402,3 +434,22 @@ plus the Director agent.
 **Why 4 separate agents instead of one "mega-agent"?** Each has a clear
 responsibility, easier to test, easier to explain to the committee. Single
 responsibility principle for agents.
+
+---
+
+## 10. Testing, evaluation, and observability
+
+- **`tests/`** — pytest suite (108 fast tests + 7 integration). Uses a
+  FakeLLM so no real API calls are made; covers models, planner, the LLM
+  wrapper (rate-limit retry, repair, tool use), the four agents, the CV
+  parser, the evals pipeline's pure logic, and KB retrieval. Run with
+  `pytest`.
+- **`evals/`** — task baskets + graders + a leaderboard. Covers planner,
+  retriever, the Director agent, and an Evaluator v1-vs-v2 calibration
+  against a 24-example human-labelled golden set (Cohen's kappa). Run with
+  `python -m evals.run_evals` (free) or
+  `python -m evals.calibrate_evaluator` (paid).
+- **Observability** — every LLM call is traced to LangSmith when
+  `LANGSMITH_API_KEY` is configured, and also appended to
+  `logs/llm_calls.jsonl` regardless. See [`TESTING.md`](TESTING.md) for
+  the full guide.
