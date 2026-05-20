@@ -6,4 +6,4 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     # Add path to production site example:
-    # - run: curl -f https://practical-interview-preparation.streamlit.app/
+     - run: curl -f https://interview-prep-coach-jkjyperfibx48rdnprzxhn.streamlit.app/
