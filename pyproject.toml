@@ -5,11 +5,14 @@ requires-python = ">=3.10"
 dependencies = [
     "streamlit>=1.28.0",
     "anthropic>=0.39.0",
+    "openai>=1.0.0",
+    "langsmith>=0.8.0",
     "chromadb>=0.5.0",
     "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
     "pypdf>=4.0.0",
     "python-dotenv>=1.0.0",
 ]
 
 [dependency-groups]
-dev = ["ruff"]
+dev = ["ruff", "pytest"]

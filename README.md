@@ -38,9 +38,6 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 # Install all dependencies (creates .venv automatically)
 uv sync --group dev
 
-# Activate virtualenv
-source .venv/bin/activate    # Mac / Linux
-# .venv\Scripts\activate     # Windows
 ```
 
 ### 2. API key
