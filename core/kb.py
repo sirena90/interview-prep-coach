@@ -36,6 +36,7 @@ KB_FILES = [
     "questions_da_qa.jsonl",
     "questions_de_fe.jsonl",
     "questions_behavioural.jsonl",
+    "questions_se.jsonl",
 ]
 
 
@@ -70,6 +71,15 @@ ROLE_TOPICS: dict[Role, set[Topic]] = {
         Topic.FRONTEND_ACCESSIBILITY,
         Topic.FRONTEND_TESTING,
         Topic.FRONTEND_SECURITY,
+    },
+    Role.SOFTWARE_ENGINEER: {
+        Topic.ALGORITHMS,
+        Topic.SYSTEM_DESIGN,
+        Topic.OOP,
+        Topic.APIS_WEB,
+        Topic.MESSAGING,
+        Topic.DATABASES,
+        Topic.CONCURRENCY,
     },
 }
 
@@ -284,6 +294,13 @@ _TOPIC_DESCRIPTIONS: dict[Topic, str] = {
     Topic.FRONTEND_ACCESSIBILITY: "Frontend accessibility: ARIA, WCAG, screen readers",
     Topic.FRONTEND_TESTING: "Frontend testing: Jest, RTL, Cypress, Playwright",
     Topic.FRONTEND_SECURITY: "Frontend security: XSS, CSRF, CSP",
+    Topic.ALGORITHMS: "Algorithms: sorting, searching, recursion, dynamic programming, big-O complexity",
+    Topic.SYSTEM_DESIGN: "System design: scalability, load balancing, caching, microservices, CAP theorem",
+    Topic.OOP: "Object-oriented design: SOLID principles, design patterns, encapsulation, inheritance",
+    Topic.APIS_WEB: "APIs and web: REST, HTTP, authentication, rate limiting, API design",
+    Topic.MESSAGING: "Messaging: queues, pub-sub, Kafka, RabbitMQ, event-driven architecture",
+    Topic.DATABASES: "Databases: SQL, NoSQL, indexing, transactions, ACID, query optimisation",
+    Topic.CONCURRENCY: "Concurrency: threads, locks, deadlocks, async/await, race conditions",
     Topic.BEHAVIOURAL: "Behavioural STAR question: situation, task, action, result",
 }
 

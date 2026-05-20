@@ -51,6 +51,14 @@ class Topic(str, Enum):
     FRONTEND_ACCESSIBILITY = "frontend_accessibility"
     FRONTEND_TESTING = "frontend_testing"
     FRONTEND_SECURITY = "frontend_security"
+    # Software Engineer
+    ALGORITHMS = "algorithms"
+    SYSTEM_DESIGN = "system_design"
+    OOP = "oop"
+    APIS_WEB = "apis_web"
+    MESSAGING = "messaging"
+    DATABASES = "databases"
+    CONCURRENCY = "concurrency"
     # Behavioural (role-agnostic, evaluated via STAR)
     BEHAVIOURAL = "behavioural"
 
@@ -66,6 +74,7 @@ class Role(str, Enum):
     QA_ENGINEER = "qa"
     DATA_ENGINEER = "de"
     FRONTEND_DEVELOPER = "fe"
+    SOFTWARE_ENGINEER = "se"
 
 
 class SlotType(str, Enum):
