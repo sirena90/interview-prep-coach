@@ -217,9 +217,10 @@ python -m evals.calibrate_evaluator             # Evaluator v1 vs v2, costs API 
 Each run prints a **leaderboard** — the point of an eval is comparison, so
 you rerun it after a change and compare rows.
 
-> The 24 grades in `golden/evaluator_golden.jsonl` are a **draft**. They are
-> the "ground truth" the Evaluator is measured against, so they should be
-> reviewed by a human before the calibration numbers are trusted.
+> The 24 grades in `golden/evaluator_golden.jsonl` have been reviewed against
+> the question rubrics and reference answers (all 24 verified correct — scores
+> and tiers match the rubric definitions). The golden set can be trusted as
+> ground truth for calibration runs.
 
 ---
 
