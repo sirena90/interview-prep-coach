@@ -4,12 +4,14 @@ A basket is a list of cases. Each case carries enough context to be re-run
 and re-graded: an input, the expected outcome, and tags. Kept deliberately
 small — a handful of hand-written cases is enough to start.
 
-Five baskets, one per angle the system needs measured:
-  PLANNER_BASKET     — deterministic slot scheduling
-  RETRIEVER_BASKET   — RAG retrieval + CV reranking
-  DIRECTOR_BASKET    — the agent's action selection (needs the real LLM)
-  INTERVIEWER_BASKET — question selection + CV anchoring + reformulation fidelity
-  BIAS_BASKET        — perturbation-based bias probes (halo, length, position, lexical mirror)
+Six baskets, one per angle the system needs measured:
+  PLANNER_BASKET          — deterministic slot scheduling
+  RETRIEVER_BASKET        — RAG retrieval + CV reranking
+  DIRECTOR_BASKET         — the agent's action selection (needs the real LLM)
+  INTERVIEWER_BASKET      — question selection + CV anchoring + reformulation fidelity
+  BIAS_BASKET             — perturbation-based bias probes (halo, length, position, lexical mirror)
+  FOLLOWUP_RUBRIC_BASKET  — Director's LLM-generated follow-up rubric quality
+                            (observable / self-consistent / distinct from the slot rubric)
 """
 from core.models import Difficulty, DirectorAction, Role, SlotType, Topic
 
@@ -364,5 +366,77 @@ BIAS_BASKET = [
         # We run the agent twice with the list reversed in the second run and
         # check that choice.id is the same both times.
         "tags": ["interviewer", "position"],
+    },
+]
+
+
+# --- Follow-up rubric basket -----------------------------------------------
+# Exercises the Director's run-time rubric generation. Each case puts the
+# Director in a situation where it *should* pick a non-MOVE_ON action; the
+# grader then inspects the rubric it produced. Three quality checks:
+#
+#   observable  — the rubric has ≥2 content criteria, each phrased
+#                 concretely enough that a grader could mark it true/false.
+#   consistent  — the Director's own reference answer, graded by the
+#                 Evaluator against the generated rubric, scores ≥4
+#                 (defence #3 at eval time).
+#   distinct    — the generated rubric is not just a copy of the slot
+#                 question's rubric (low overlap on content criteria).
+#
+# Cases reference real KB ids so the grader can pull the slot rubric for
+# the distinctness comparison.
+
+FOLLOWUP_RUBRIC_BASKET = [
+    {
+        "id": "fup-01",
+        "description": "strong SQL-join answer -> Director should dig deeper with a sharper rubric",
+        "slot_question_id": "da-001",
+        "user_answer": (
+            "An INNER JOIN keeps only rows where the join key matches in both tables. "
+            "A LEFT JOIN keeps every row from the left table and NULL-fills unmatched "
+            "right-side columns. Use INNER for orders with valid customers, LEFT to "
+            "list all customers including those who never ordered."
+        ),
+        "scores": {"content": 5, "clarity": 5, "structure": 5, "overall": 5},
+        "turn_history": "(this is the first turn on this question)",
+        "tags": ["strong"],
+    },
+    {
+        "id": "fup-02",
+        "description": "shallow QA bug-report answer -> Director should follow up on a different angle",
+        "slot_question_id": "qa-002",
+        "user_answer": (
+            "A good bug report has a title, repro steps, environment, expected vs "
+            "actual behaviour, and evidence."
+        ),
+        "scores": {"content": 4, "clarity": 4, "structure": 3, "overall": 4},
+        "turn_history": "(this is the first turn on this question)",
+        "tags": ["medium", "bug_report"],
+    },
+    {
+        "id": "fup-03",
+        "description": "weak SQL answer -> Director should clarify or follow up with a focused rubric",
+        "slot_question_id": "da-001",
+        "user_answer": "They're both joins. One of them keeps more rows I think.",
+        "scores": {"content": 2, "clarity": 2, "structure": 2, "overall": 2},
+        "turn_history": "(this is the first turn on this question)",
+        "tags": ["weak"],
+    },
+    {
+        "id": "fup-04",
+        "description": "strong frontend answer -> Director should dig deeper with a harder, distinct rubric",
+        "slot_question_id": "fe-001",
+        "user_answer": (
+            "var is function-scoped and hoisted with an undefined initialiser, which "
+            "creates the temporal dead zone footgun. let is block-scoped and not "
+            "hoisted in the same way — using it before the declaration throws. "
+            "const is block-scoped and immutable in binding (the variable can't be "
+            "reassigned), though the value can still mutate if it's an object. I "
+            "default to const, fall back to let when reassignment is needed, and "
+            "never use var in new code."
+        ),
+        "scores": {"content": 5, "clarity": 5, "structure": 4, "overall": 5},
+        "turn_history": "(this is the first turn on this question)",
+        "tags": ["strong", "frontend"],
     },
 ]

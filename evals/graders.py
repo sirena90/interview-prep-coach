@@ -17,12 +17,18 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
-from core.agents import ConversationDirectorAgent, EvaluatorAgent, InterviewerAgent
+from core.agents import (
+    ConversationDirectorAgent,
+    EvaluatorAgent,
+    InterviewerAgent,
+    build_followup_question,
+)
 from core.llm import call_llm
 from core.models import (
     CVProfile,
     Difficulty,
     DimensionScore,
+    DirectorAction,
     Question,
     Rubric,
     ScoreReport,
@@ -399,6 +405,126 @@ def grade_bias(kb, basket: list[dict]) -> dict:
     for kind, total_k in by_kind_total.items():
         out[f"bias_{kind}"] = by_kind_pass.get(kind, 0) / total_k
     return out
+
+
+# ---- Follow-up rubric grader (defence #4) ---------------------------------
+
+def grade_followup_rubric(kb, basket: list[dict]) -> dict:
+    """Run the Director on each case and grade the rubric it produced.
+
+    Three quality checks per non-MOVE_ON case:
+      observable  — ≥2 content criteria, each at least 10 characters
+                    (a proxy for being concrete enough to evaluate).
+      consistent  — Evaluator graded against the generated rubric, fed the
+                    Director's own reference answer, returns overall ≥4.
+                    This is the same self-consistency check that defence #3
+                    enforces at runtime.
+      distinct    — generated rubric does not just duplicate the slot
+                    question's rubric criteria (lexical overlap below half).
+
+    Cases where the Director picks MOVE_ON are recorded but not counted in
+    the rubric-quality denominator — there is no rubric to grade. A run
+    where every case becomes MOVE_ON is itself a signal worth surfacing.
+    """
+    director = ConversationDirectorAgent()
+    evaluator = EvaluatorAgent()
+    rows = []
+    obs_pass = cons_pass = dist_pass = 0
+    rubric_total = 0
+    move_on_count = 0
+
+    for case in basket:
+        slot_q = kb.get(case["slot_question_id"])
+        s = case["scores"]
+        report = ScoreReport(
+            content=DimensionScore(score=s["content"], comment="-"),
+            clarity=DimensionScore(score=s["clarity"], comment="-"),
+            structure=DimensionScore(score=s["structure"], comment="-"),
+            actionable_feedback=["-"],
+            overall=s["overall"],
+        )
+        choice = director.decide_next_action(
+            question=slot_q,
+            user_answer=case["user_answer"],
+            score_report=report,
+            turn_history_for_question=case.get(
+                "turn_history", "(this is the first turn on this question)"
+            ),
+        )
+
+        row = {"id": case["id"], "action": choice.action.value}
+
+        if choice.action == DirectorAction.MOVE_ON:
+            move_on_count += 1
+            row["pass"] = True  # MOVE_ON has no rubric — nothing to fail on
+            row["skipped"] = "director chose move_on"
+            rows.append(row)
+            continue
+
+        if choice.follow_up_rubric is None or not choice.follow_up_reference:
+            # Schema lets these through as None; that's a fail at this stage.
+            row.update({"observable": False, "consistent": False,
+                        "distinct": False, "pass": False,
+                        "error": "follow_up_rubric or reference missing"})
+            rubric_total += 1
+            rows.append(row)
+            continue
+
+        rubric_total += 1
+        rubric = choice.follow_up_rubric
+
+        # 1. observable
+        obs_ok = (len(rubric.content) >= 2
+                  and all(len(c.strip()) >= 10 for c in rubric.content))
+        obs_pass += obs_ok
+        row["observable"] = obs_ok
+        row["n_content"] = len(rubric.content)
+
+        # 2. self-consistency
+        synth_q = build_followup_question(choice=choice, slot_question=slot_q)
+        eval_report = evaluator.evaluate(
+            question=synth_q, user_answer=choice.follow_up_reference
+        )
+        cons_ok = eval_report.overall >= 4
+        cons_pass += cons_ok
+        row["consistent"] = cons_ok
+        row["self_eval_overall"] = eval_report.overall
+
+        # 3. distinctness — Jaccard on the lower-cased content criteria.
+        # Tolerant: passes when fewer than half the follow-up criteria are
+        # lexically identical to slot rubric criteria.
+        slot_set = {c.lower().strip() for c in slot_q.rubric.content}
+        fup_set = {c.lower().strip() for c in rubric.content}
+        overlap = slot_set & fup_set
+        dist_ok = len(overlap) < max(1, len(fup_set) // 2 + 1)
+        dist_pass += dist_ok
+        row["distinct"] = dist_ok
+        row["overlap_n"] = len(overlap)
+
+        row["pass"] = obs_ok and cons_ok and dist_ok
+        rows.append(row)
+
+    if rubric_total == 0:
+        return {
+            "followup_rubric_score": 1.0,
+            "followup_observable":   1.0,
+            "followup_consistent":   1.0,
+            "followup_distinct":     1.0,
+            "rows": rows,
+            "note": f"all {move_on_count} cases produced move_on; no rubric to grade",
+        }
+
+    obs_rate = obs_pass / rubric_total
+    cons_rate = cons_pass / rubric_total
+    dist_rate = dist_pass / rubric_total
+    combined = (obs_rate + cons_rate + dist_rate) / 3
+    return {
+        "followup_rubric_score": combined,
+        "followup_observable":   obs_rate,
+        "followup_consistent":   cons_rate,
+        "followup_distinct":     dist_rate,
+        "rows": rows,
+    }
 
 
 def grade_evaluator(kb, golden: list[dict], version: str) -> dict:

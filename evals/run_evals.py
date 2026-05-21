@@ -1,10 +1,11 @@
 """Run the eval baskets and print the leaderboard.
 
-    python -m evals.run_evals                   # free angles only (planner, retriever)
-    python -m evals.run_evals --director        # also run the Director (real API calls)
-    python -m evals.run_evals --interviewer     # also run the Interviewer (real API calls)
-    python -m evals.run_evals --bias            # also run the bias suite (real API calls)
-    python -m evals.run_evals --all             # everything
+    python -m evals.run_evals                       # free angles only (planner, retriever)
+    python -m evals.run_evals --director            # also run the Director (real API calls)
+    python -m evals.run_evals --interviewer         # also run the Interviewer (real API calls)
+    python -m evals.run_evals --bias                # also run the bias suite (real API calls)
+    python -m evals.run_evals --followup-rubric     # also run the follow-up rubric eval (real API calls)
+    python -m evals.run_evals --all                 # everything
 
 Each basket -> grader -> append to the leaderboard. The leaderboard frames
 evaluation as comparison; rerun it after any change to the system and
@@ -20,6 +21,7 @@ from core.kb import KnowledgeBase
 from evals.baskets import (
     BIAS_BASKET,
     DIRECTOR_BASKET,
+    FOLLOWUP_RUBRIC_BASKET,
     INTERVIEWER_BASKET,
     PLANNER_BASKET,
     RETRIEVER_BASKET,
@@ -27,6 +29,7 @@ from evals.baskets import (
 from evals.graders import (
     grade_bias,
     grade_director,
+    grade_followup_rubric,
     grade_interviewer,
     grade_planner,
     grade_retriever,
@@ -59,13 +62,18 @@ def main() -> None:
         help="also run the bias basket (halo / length / lexical / position; real LLM calls)",
     )
     parser.add_argument(
+        "--followup-rubric", action="store_true",
+        help="also run the follow-up rubric eval (observable / consistent / distinct; real LLM calls)",
+    )
+    parser.add_argument(
         "--all", action="store_true",
-        help="run every basket (planner, retriever, director, interviewer, bias)",
+        help="run every basket (planner, retriever, director, interviewer, bias, followup-rubric)",
     )
     args = parser.parse_args()
     run_director = args.director or args.all
     run_interviewer = args.interviewer or args.all
     run_bias = args.bias or args.all
+    run_followup = args.followup_rubric or args.all
 
     print("Building the knowledge base (Chroma index)...")
     kb = KnowledgeBase()
@@ -117,6 +125,20 @@ def main() -> None:
     else:
         print("\nBias basket skipped - pass --bias to run it "
               "(it makes real LLM calls).")
+
+    # --- Follow-up rubric quality (Director-generated rubrics) -------------
+    if run_followup:
+        print(f"\nFollow-up rubric basket - {len(FOLLOWUP_RUBRIC_BASKET)} cases (real API calls)")
+        followup_result = grade_followup_rubric(kb, FOLLOWUP_RUBRIC_BASKET)
+        _print_rows(followup_result["rows"])
+        followup_metrics = {k: v for k, v in followup_result.items()
+                            if k not in ("rows", "note")}
+        add_to_leaderboard(VERSION, followup_metrics)
+        if "note" in followup_result:
+            print(f"  note: {followup_result['note']}")
+    else:
+        print("\nFollow-up rubric basket skipped - pass --followup-rubric "
+              "to run it (it makes real LLM calls).")
 
     print("\n=== LEADERBOARD ===")
     show_leaderboard()
