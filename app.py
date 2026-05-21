@@ -288,7 +288,7 @@ def _advance_to_next_question() -> None:
             difficulty=plan.difficulty,
             slot_type=plan.slot_type,
             reference_answer="",
-            rubric=Rubric(content=[], clarity=[], structure=[]),
+            rubric=Rubric(content=["(no question available)"], clarity=[], structure=[]),
             tags=[],
         )
         st.session_state.current_question = placeholder_q
