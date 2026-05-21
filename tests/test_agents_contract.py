@@ -25,17 +25,21 @@ from core.models import (
     SlotType,
     Topic,
 )
-from tests.conftest import fake_llm, make_question
-
 
 class TestInterviewerAgent:
-    def test_single_candidate_skips_the_llm(self, fake_llm, make_question):
+    def test_single_candidate_still_calls_the_llm(self, fake_llm, make_question):
+        # Even with a single candidate we call the LLM so it can paraphrase the
+        # question and anchor it in the CV. The fast path was removed because it
+        # caused the user-visible "CV was ignored" symptom.
         q = make_question(qid="only-1")
+        fake_llm.queue(InterviewerChoice,
+                       InterviewerChoice(id="only-1", phrased="Tell me about joins."))
         choice = InterviewerAgent().ask(
             candidates=[q], topic=Topic.SQL, difficulty=Difficulty.MID
         )
         assert choice.id == "only-1"
-        assert fake_llm.call_count == 0  # fast path: no LLM call
+        assert choice.phrased == "Tell me about joins."
+        assert fake_llm.call_count == 1
 
     def test_invented_id_falls_back_to_first_candidate(self, fake_llm, make_question):
         c1, c2 = make_question(qid="real-1"), make_question(qid="real-2")
@@ -207,6 +211,20 @@ class TestConversationDirector:
         prompt = fake_llm.calls[0].user
         assert "my unique answer text" in prompt
         assert "2/5" in prompt
+
+    def test_director_returns_non_move_on_with_text(
+        self, fake_llm, make_question, make_score_report
+    ):
+        fake_llm.queue(DirectorChoice, DirectorChoice(
+            action=DirectorAction.DIG_DEEPER,
+            text="How would you prioritise bugs you found during testing?",
+        ))
+        result = ConversationDirectorAgent().decide_next_action(
+            question=make_question(), user_answer="answer",
+            score_report=make_score_report(overall=5),
+        )
+        assert result.action is DirectorAction.DIG_DEEPER
+        assert "prioritise" in result.text
 
 
 class TestCoachingSummariser:

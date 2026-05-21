@@ -170,8 +170,8 @@ class DirectorChoice(BaseModel):
     """Conversation Director output: what to do after each answer.
 
     If action == MOVE_ON, `text` is empty; planner picks the next question.
-    Otherwise `text` is the next message shown to the user, and the same
-    question stays active for the next round of evaluation.
+    Otherwise `text` is the next message shown to the user and the same
+    slot stays active for one more round.
     """
     action: DirectorAction
     text: str = ""

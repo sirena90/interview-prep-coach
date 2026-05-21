@@ -22,6 +22,7 @@ from core.models import (
     CriterionJudgement,
     CVProfile,
     DimensionScore,
+    DirectorAction,
     DirectorChoice,
     Difficulty,
     InterviewerChoice,
@@ -44,8 +45,20 @@ INTERVIEWER_SYSTEM = """You are an interview coach choosing the next question to
 You will receive a list of candidate questions from the knowledge base. Your job:
 1. Pick the most appropriate question for the candidate (semantic fit, variety).
 2. Paraphrase it naturally so it sounds like a real interviewer talking.
-3. If the candidate's CV mentions a project or skill that naturally connects to the question,
-   reference it in your phrasing. Do NOT force a connection where none exists.
+3. Anchor the phrasing in the candidate's CV whenever there is *any* reasonable
+   overlap between the question's topic/skills and a CV skill, project, or
+   claimed strength. This is the default behaviour, not the exception.
+   - Examples of reasonable overlap: question is about SQL joins and the CV
+     lists PostgreSQL or MySQL; question is about dashboards and the CV
+     mentions Tableau or Power BI; question is about testing strategy and the
+     CV lists pytest or Cypress.
+   - Lead with the CV reference, e.g. "In your Tableau dashboard project, ...",
+     "Given your PostgreSQL experience at <company>, ...", "You listed pytest
+     as a strength — ...".
+4. Only fall back to a plain, generic phrasing when the CV is genuinely empty
+   or has zero connection to the topic (e.g. behavioural question with a CV
+   that lists only unrelated technical skills). Do not invent CV facts that
+   aren't there.
 
 Return ONLY a JSON object filled in with real values that satisfy the schema
 below. Do NOT return the schema definition itself — return actual data.
@@ -61,12 +74,14 @@ Difficulty: {difficulty}
 Candidate questions to pick from:
 {candidates_json}
 
-User's CV signals (use only where natural):
+User's CV signals:
 {cv_signals}
 
 Pick the ID of the question you choose, and write your phrased version.
-Phrasing should be one sentence, sound like a real interviewer, and reference CV only if it
-genuinely fits."""
+Phrasing should be one sentence and sound like a real interviewer. If any CV
+skill, project, or strength is related to the topic above, your phrasing MUST
+open by referencing it concretely. Only skip the CV reference if there is no
+plausible connection at all."""
 
 
 class InterviewerAgent:
@@ -83,11 +98,6 @@ class InterviewerAgent:
     ) -> InterviewerChoice:
         if not candidates:
             raise ValueError("InterviewerAgent received no candidates")
-
-        # Fast path: only one candidate → no need for an LLM call.
-        if len(candidates) == 1:
-            q = candidates[0]
-            return InterviewerChoice(id=q.id, phrased=q.question)
 
         candidates_repr = [
             {"id": q.id, "question": q.question, "subtopic": q.subtopic}
@@ -332,6 +342,9 @@ Loop guards:
 - If the candidate has already had 1 clarify/followup/dig_deeper turn on the SAME question, choose move_on.
 - Default to move_on unless one of the other actions clearly applies.
 
+When the action is not move_on, write the follow-up question in `text`.
+When the action IS move_on, leave `text` empty.
+
 Return ONLY a JSON object filled in with real values that satisfy the schema
 below. Do NOT return the schema definition itself — return actual data.
 No prose, no code fences.
@@ -542,7 +555,7 @@ class CoachingSummariserAgent:
             tool_executor=tool_executor,
             max_tokens=2048,
             temperature=0.3,
-            max_iterations=8,
+            max_iterations=12,
         )
 
 

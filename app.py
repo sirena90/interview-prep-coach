@@ -31,8 +31,11 @@ from core.kb import KnowledgeBase
 from core.llm import set_retry_notifier
 from core.models import (
     CVProfile,
+    DimensionScore,
     DirectorAction,
     Difficulty,
+    Question,
+    Rubric,
     RollingScore,
     Role,
     ScoreReport,
@@ -96,16 +99,19 @@ def get_planner() -> SimplePlanner:
 def init_app_state() -> None:
     """Initialise the per-user state on first run."""
     if "phase" not in st.session_state:
-        st.session_state.phase = "setup"          # setup / interview / done
+        st.session_state.phase = "setup"           # setup / interview / done
         st.session_state.session = None            # SessionState (Pydantic)
-        st.session_state.current_question = None   # the Question being asked
+        st.session_state.current_question = None   # the slot's KB Question
         st.session_state.current_slot = None       # the active TurnPlan
         st.session_state.chat_messages = []        # list of {role, content}
         st.session_state.director_rounds = 0       # follow-up rounds within current question
-        st.session_state.slot_first_answer = None  # first answer to the current slot
-        st.session_state.slot_score_report = None  # score of the first answer to the current slot
-        st.session_state.slot_followup_answers = []  # any clarifications after the first answer
+        st.session_state.slot_first_answer = None  # first answer in the current slot
+        st.session_state.slot_score_report = None  # score of the first answer
+        st.session_state.slot_followup_answers = []  # clarifications after the first answer
         st.session_state.final_summary = None      # SessionSummary at end
+        st.session_state.final_summary_error = None  # last Coach failure, if any
+        st.session_state.fatal_error = None        # last unhandled exception in a phase
+        st.session_state.fatal_error_type = None
         st.session_state.cv_profile = None         # CVProfile from upload
 
 
@@ -223,6 +229,13 @@ def render_interview() -> None:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
+    # Skip button — only shown when a real question is active.
+    if st.session_state.current_question is not None and st.button("⏭️ I don't know — skip this question",
+                 help="Move on without answering. Counts as a weak attempt "
+                      "for this topic, no feedback is generated."):
+        _skip_current_question()
+        st.rerun()
+
     # Get user answer
     user_input = st.chat_input("Type your answer...")
     if user_input:
@@ -241,9 +254,6 @@ def _advance_to_next_question() -> None:
     plan: TurnPlan = planner.plan_next_turn(state)
     st.session_state.current_slot = plan
     st.session_state.director_rounds = 0
-    # Reset per-slot answer/score caches — only the first answer is evaluated
-    # per slot; follow-up clarifications reuse the first score and are
-    # appended to the answer text at commit time.
     st.session_state.slot_first_answer = None
     st.session_state.slot_score_report = None
     st.session_state.slot_followup_answers = []
@@ -265,11 +275,39 @@ def _advance_to_next_question() -> None:
         )
 
     if not candidates:
-        # Defensive: skip this slot if KB exhausted
+        # KB exhausted for this slot — advance without penalising the candidate.
+        # We still need a TurnRecord to keep turn_count() correct, so we commit
+        # a neutral placeholder that won't drag down the final report.
         st.session_state.chat_messages.append({
             "role": "assistant",
-            "content": "_(no questions available for this slot; advancing)_",
+            "content": "_(no questions available for this slot — skipping without penalty)_",
         })
+        placeholder_q = Question(
+            id=f"__empty_{plan.slot_type.value}__",
+            question="(no question available)",
+            topic=plan.topic,
+            subtopic="",
+            difficulty=plan.difficulty,
+            slot_type=plan.slot_type,
+            reference_answer="",
+            rubric=Rubric(content=["(no question available)"], clarity=[], structure=[]),
+            tags=[],
+        )
+        st.session_state.current_question = placeholder_q
+        state.current_question_id = placeholder_q.id
+        neutral_report = ScoreReport(
+            content=DimensionScore(score=3, comment="no question"),
+            clarity=DimensionScore(score=3, comment="no question"),
+            structure=DimensionScore(score=3, comment="no question"),
+            actionable_feedback=[],
+            overall=3,
+        )
+        _commit_turn("(no question available)", neutral_report)
+        st.session_state.current_question = None
+        if state.turn_count() >= state.target_turns:
+            _finish_session()
+        else:
+            _advance_to_next_question()
         return
 
     # Interviewer picks + paraphrases
@@ -291,16 +329,73 @@ def _advance_to_next_question() -> None:
     }[plan.slot_type]
 
     q_num = state.turn_count() + 1
+    cv_match_line = _cv_match_caption(question, cv)
     header = (
         f"### Q{q_num} — {slot_label}\n"
-        f"*Topic: {plan.topic.value} · Difficulty: {plan.difficulty.value}*\n\n"
+        f"*Topic: {plan.topic.value} · Difficulty: {plan.difficulty.value}*\n"
+        f"{cv_match_line}\n"
         f"{choice.phrased}"
     )
     st.session_state.chat_messages.append({"role": "assistant", "content": header})
 
 
+def _cv_match_caption(question, cv: CVProfile | None) -> str:
+    """Return a one-line caption showing which CV skills drove this choice.
+
+    Empty string when there's no overlap or no CV — keeps the header clean.
+    Surfaces the otherwise-invisible CV-aware reranking so the user can see
+    that uploading their CV actually changed what they were asked.
+    """
+    if cv is None or not cv.skills or not question.skill_tags:
+        return ""
+    tag_set = {t.lower().strip() for t in question.skill_tags}
+    # Preserve the user's original CV casing in the displayed match.
+    matched = [s for s in cv.skills if s.lower().strip() in tag_set]
+    if not matched:
+        return ""
+    rendered = ", ".join(f"**{s}**" for s in matched[:4])
+    return f"\n> 📄 Picked from your CV: {rendered}\n"
+
+
+def _skip_current_question() -> None:
+    """Commit a placeholder turn for a skipped question and advance.
+
+    No LLM call. The TurnRecord stores a 1/5 ScoreReport with a `(skipped)`
+    feedback note so the topic still registers as weak in the final report.
+    """
+    state: SessionState = st.session_state.session
+    slot_question = st.session_state.current_question
+    plan = st.session_state.current_slot
+    if slot_question is None or plan is None or state is None:
+        st.error("No active question to skip.")
+        return
+
+    st.session_state.chat_messages.append({
+        "role": "user", "content": "_(skipped)_",
+    })
+    st.session_state.chat_messages.append({
+        "role": "assistant",
+        "content": "_Question skipped — moving on. This topic counts as a "
+                   "weak area in your final report._",
+    })
+
+    skip_report = ScoreReport(
+        content=DimensionScore(score=1, comment="skipped"),
+        clarity=DimensionScore(score=1, comment="skipped"),
+        structure=DimensionScore(score=1, comment="skipped"),
+        actionable_feedback=["candidate skipped — practice this topic"],
+        overall=1,
+    )
+    _commit_turn("(skipped)", skip_report)
+
+    if state.turn_count() >= state.target_turns:
+        _finish_session()
+    else:
+        _advance_to_next_question()
+
+
 def _handle_user_answer(answer: str) -> None:
-    """Evaluate, run Director, decide whether to stay on Q or advance."""
+    """Evaluate the answer, run the Director, decide whether to stay or advance."""
     state: SessionState = st.session_state.session
     agents = get_agents()
     question = st.session_state.current_question
@@ -310,14 +405,11 @@ def _handle_user_answer(answer: str) -> None:
         st.error("No active question. Refresh and start over.")
         return
 
-    # Show user answer
     st.session_state.chat_messages.append({"role": "user", "content": answer})
 
-    is_first_turn_in_slot = st.session_state.slot_score_report is None
+    is_first_turn = st.session_state.slot_score_report is None
 
-    if is_first_turn_in_slot:
-        # Evaluate the first answer to this slot — the score sticks for the
-        # whole slot, even if the Director asks a follow-up afterwards.
+    if is_first_turn:
         with st.spinner("Evaluating your answer..."):
             score_report: ScoreReport = agents["evaluator"].evaluate(
                 question=question,
@@ -325,33 +417,31 @@ def _handle_user_answer(answer: str) -> None:
             )
         st.session_state.slot_first_answer = answer
         st.session_state.slot_score_report = score_report
-
-        # Render feedback once, after the first answer.
         feedback_md = _format_feedback(score_report)
         st.session_state.chat_messages.append({"role": "assistant", "content": feedback_md})
     else:
-        # Follow-up answer — reuse the original score (clarifications are not
-        # rubric-graded on their own; we'd unfairly penalise a one-sentence
-        # clarification against e.g. a full STAR rubric).
         score_report = st.session_state.slot_score_report
         st.session_state.slot_followup_answers.append(answer)
 
-    # Director — only after the first round on this Q (subsequent rounds also call it)
-    history_summary = _summarise_director_history()
+    if st.session_state.director_rounds == 0:
+        history = "(this is the first answer to this question)"
+    else:
+        history = (f"(the candidate has already had {st.session_state.director_rounds} "
+                   f"follow-up round(s) on this question)")
+
     with st.spinner("Deciding next move..."):
         choice = agents["director"].decide_next_action(
             question=question,
             user_answer=answer,
             score_report=score_report,
-            turn_history_for_question=history_summary,
+            turn_history_for_question=history,
         )
 
-    # Loop guard: cap follow-ups at 1 to keep sessions short and avoid grilling
+    # Loop guard: cap follow-ups at 1 round per slot.
     if st.session_state.director_rounds >= 1 and choice.action != DirectorAction.MOVE_ON:
         choice.action = DirectorAction.MOVE_ON
         choice.text = ""
 
-    # If staying on this question, just send Director's text and wait
     if choice.action != DirectorAction.MOVE_ON:
         st.session_state.chat_messages.append({
             "role": "assistant",
@@ -360,23 +450,18 @@ def _handle_user_answer(answer: str) -> None:
         st.session_state.director_rounds += 1
         return
 
-    # MOVE_ON: persist this turn and advance.
-    # If there were follow-up clarifications, re-evaluate the COMBINED answer
-    # against the rubric so the final score reflects the full picture, not
-    # just the first answer in isolation. This is fair because the rubric
-    # is applied to the user's full response, not to a clarification fragment.
+    # MOVE_ON: combine all answers and re-evaluate if there were clarifications.
     combined_answer = st.session_state.slot_first_answer or answer
     for extra in st.session_state.slot_followup_answers:
         combined_answer += f"\n\n[Clarification] {extra}"
 
     final_score = score_report
     if st.session_state.slot_followup_answers:
-        with st.spinner("Re-evaluating with your clarification..."):
+        with st.spinner("Re-evaluating with your full response..."):
             final_score = agents["evaluator"].evaluate(
                 question=question,
                 user_answer=combined_answer,
             )
-        # Show the updated feedback before moving on.
         st.session_state.chat_messages.append({
             "role": "assistant",
             "content": _format_updated_feedback(score_report, final_score),
@@ -388,13 +473,6 @@ def _handle_user_answer(answer: str) -> None:
         _finish_session()
     else:
         _advance_to_next_question()
-
-
-def _summarise_director_history() -> str:
-    rounds = st.session_state.director_rounds
-    if rounds == 0:
-        return "(this is the first answer to this question)"
-    return f"(the candidate has already had {rounds} follow-up round(s) on this question)"
 
 
 def _commit_turn(user_answer: str, score_report: ScoreReport) -> None:
@@ -434,21 +512,17 @@ def _format_feedback(report: ScoreReport) -> str:
 
 
 def _format_updated_feedback(initial: ScoreReport, final: ScoreReport) -> str:
-    """Show the re-evaluated score after a clarification, with deltas vs the initial score.
-
-    Called only when the slot had at least one follow-up answer. The final score
-    reflects the combined (first + clarifications) answer scored against the rubric.
-    """
+    """Show re-evaluated score after a clarification round, with deltas vs the initial."""
     def _arrow(a: int, b: int) -> str:
         if b > a:
             return f"{a} → {b} ↑"
         if b < a:
             return f"{a} → {b} ↓"
-        return f"{b}"
+        return str(b)
 
     tips = "; ".join(final.actionable_feedback)
     return (
-        f"**Updated after your clarification — overall {_arrow(initial.overall, final.overall)}/5** "
+        f"**Updated score (full response) — overall {_arrow(initial.overall, final.overall)}/5** "
         f"(content {_arrow(initial.content.score, final.content.score)}, "
         f"clarity {_arrow(initial.clarity.score, final.clarity.score)}, "
         f"structure {_arrow(initial.structure.score, final.structure.score)})\n\n"
@@ -464,17 +538,53 @@ def _format_updated_feedback(initial: ScoreReport, final: ScoreReport) -> str:
 # ============================================================================
 
 def _finish_session() -> None:
+    """Generate the coaching report. On Coach failure, transition to `done`
+    anyway with `final_summary=None` and a stored error message; render_final
+    will surface a Retry button. Session state is fully preserved so retry
+    is a single re-call against the same SessionState.
+    """
     state: SessionState = st.session_state.session
     state.ended_at = datetime.now(timezone.utc)
     agents = get_agents()
-    with st.spinner("Writing your personalised coaching report..."):
-        st.session_state.final_summary = agents["coach"].summarise(state)
+    try:
+        with st.spinner("Writing your personalised coaching report..."):
+            st.session_state.final_summary = agents["coach"].summarise(state)
+        st.session_state.final_summary_error = None
+    except Exception as exc:  # noqa: BLE001 — Coach can raise many things
+        st.session_state.final_summary = None
+        st.session_state.final_summary_error = f"{type(exc).__name__}: {exc}"
     st.session_state.phase = "done"
 
 
 def render_final() -> None:
     state: SessionState = st.session_state.session
     summary = st.session_state.final_summary
+    err = st.session_state.get("final_summary_error")
+
+    # Coach failed (e.g. JSON decode error, exhausted rate-limit retries).
+    # Don't lose the session — show what we have, explain, offer a retry.
+    if err and not summary:
+        st.title("🏁 Session complete — final report unavailable")
+        st.markdown(
+            f"**{ROLE_LABELS[state.role]}** · {DIFFICULTY_LABELS[state.difficulty]} · "
+            f"{state.turn_count()} questions answered"
+        )
+        st.warning(
+            f"Could not generate the coaching report: {err}\n\n"
+            "Your answers are still saved. This is usually transient — "
+            "try again."
+        )
+        col_a, col_b = st.columns(2)
+        with col_a:
+            if st.button("🔄 Retry final report", type="primary"):
+                _finish_session()
+                st.rerun()
+        with col_b:
+            if st.button("Start a new session"):
+                for key in list(st.session_state.keys()):
+                    del st.session_state[key]
+                st.rerun()
+        return
 
     st.title("🏁 Session complete")
     st.markdown(
@@ -521,6 +631,14 @@ def render_final() -> None:
 
 def main() -> None:
     init_app_state()
+
+    # If the previous run raised, surface the error and offer a retry
+    # *before* trying to render the failed phase again. Session state is
+    # preserved so retry resumes from where the user was.
+    if st.session_state.get("fatal_error"):
+        _render_fatal_error_banner()
+        return
+
     phase = st.session_state.phase
 
     try:
@@ -532,10 +650,39 @@ def main() -> None:
             render_final()
         else:
             st.error(f"Unknown phase: {phase}")
-    except RuntimeError as exc:
-        # Raised when the LLM provider keeps rate-limiting after all retries,
-        # or when a provider is misconfigured. Show the message, not a crash.
-        st.error(str(exc))
+    except Exception as exc:  # noqa: BLE001 — any agent / network / parser error
+        st.session_state.fatal_error = str(exc) or type(exc).__name__
+        st.session_state.fatal_error_type = type(exc).__name__
+        st.rerun()
+
+
+def _render_fatal_error_banner() -> None:
+    """Generic 'session paused' UI for any unhandled exception in a phase.
+
+    The user's progress is intact (chat history, session, CV); only the
+    *current* operation failed. Retry simply clears the error flag and
+    reruns the same phase. Common triggers: transient LLM JSON decode
+    failures, exhausted rate-limit retries, network blips.
+    """
+    err = st.session_state.get("fatal_error", "unknown error")
+    err_type = st.session_state.get("fatal_error_type", "Error")
+    st.error(
+        f"⚠️ **Session paused — {err_type}**\n\n"
+        f"{err}\n\n"
+        "Your progress is saved. This is usually transient (API rate limit "
+        "or a model output that failed to parse). Click Retry to resume."
+    )
+    col_a, col_b = st.columns(2)
+    with col_a:
+        if st.button("🔄 Retry", type="primary"):
+            st.session_state.fatal_error = None
+            st.session_state.fatal_error_type = None
+            st.rerun()
+    with col_b:
+        if st.button("Start over"):
+            for key in list(st.session_state.keys()):
+                del st.session_state[key]
+            st.rerun()
 
 
 if __name__ == "__main__":

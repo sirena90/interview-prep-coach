@@ -214,8 +214,12 @@ Four LLM agents, each with one job:
 #### InterviewerAgent
 - **Input:** list of candidate questions from the Retriever + CV profile
 - **Output:** `InterviewerChoice(id, phrased)`
-- **Job:** pick one candidate and paraphrase it naturally, optionally referencing the CV
-- **Fast path:** if there is only one candidate, no LLM call
+- **Job:** pick one candidate and paraphrase it naturally, anchoring the phrasing
+  in the CV whenever there is any reasonable overlap (CV anchoring is the
+  default behaviour, not the exception)
+- **UI surfacing:** when the chosen question's `skill_tags` overlap the CV
+  skills, the UI shows a one-line caption ("📄 Picked from your CV: ...") so
+  the user can see that the CV actually affected what was asked
 - **Defensive:** if the LLM invents an id not in the candidates → falls back to the first
 
 #### EvaluatorAgent
@@ -231,9 +235,26 @@ Four LLM agents, each with one job:
 
 #### ConversationDirectorAgent ★ AGENT #1
 - **Input:** Question + user_answer + ScoreReport + history
-- **Output:** `DirectorChoice(action, text)`
+- **Output:** `DirectorChoice(action, text, follow_up_rubric?, follow_up_reference?)`
 - **Actions:** clarify, followup, dig_deeper, move_on
 - **Why this is "the real agent":** it picks an action from a fixed set based on observation, in a closed loop. That matches the formal definition of an agent.
+- **Follow-up grading anchor (Option B):** when the action is non-MOVE_ON,
+  the Director also emits a small `follow_up_rubric` and a `follow_up_reference`
+  answer alongside the question text. Those become a synthesised `Question`
+  used to grade the candidate's next answer — so a `dig_deeper` reply is
+  scored against a rubric that fits what was actually asked, not the slot's
+  original rubric.
+- **Four defences on the LLM-generated rubric:**
+  1. *Pydantic schema* — rubric must have ≥1 content criterion (string).
+  2. *Prompt constraints* — criteria must be observable, specific, distinct
+     from the original rubric; a model reference answer is co-emitted.
+  3. *Runtime self-consistency* — `validate_followup_choice` runs the
+     Evaluator on the Director's own reference against its own rubric; if it
+     scores <4 the choice is degraded to MOVE_ON so the candidate is never
+     graded against a broken rubric.
+  4. *Eval basket* — `FOLLOWUP_RUBRIC_BASKET` measures observable /
+     consistent / distinct quality on a curated set of cases and reports
+     the rates on the leaderboard.
 
 #### CoachingSummariserAgent ★ AGENT #2
 - **Input:** the full SessionState + CVProfile + the KB (for tool calls)
@@ -291,7 +312,7 @@ provider-agnostic, so this works on Anthropic, OpenAI, or Mistral.
 - Evaluator (LLM-as-judge)
 - CV Parser (LLM-as-extractor)
 
-Total **~20 LLM calls per session** (1 CV parse + 5 × Evaluator + 5 × Director + 5 × Interviewer when there are multiple candidates + 1 Coach + a small number of Coach tool-call rounds). The Evaluator's v2 mode adds 2 extra calls per turn.
+Total **~20 LLM calls per session** (1 CV parse + 5 × Evaluator + 5 × Director + 5 × Interviewer + 1 Coach + a small number of Coach tool-call rounds). The Evaluator's v2 mode adds 2 extra calls per turn.
 
 ---
 
@@ -443,16 +464,32 @@ responsibility principle for agents.
 
 ## 10. Testing, evaluation, and observability
 
-- **`tests/`** — pytest suite (108 fast tests + 7 integration). Uses a
+- **`tests/`** — pytest suite (121 fast tests + 7 integration). Uses a
   FakeLLM so no real API calls are made; covers models, planner, the LLM
   wrapper (rate-limit retry, repair, tool use), the four agents, the CV
-  parser, the evals pipeline's pure logic, and KB retrieval. Run with
-  `pytest`.
-- **`evals/`** — task baskets + graders + a leaderboard. Covers planner,
-  retriever, the Director agent, and an Evaluator v1-vs-v2 calibration
-  against a 24-example human-labelled golden set (Cohen's kappa). Run with
-  `python -m evals.run_evals` (free) or
-  `python -m evals.calibrate_evaluator` (paid).
+  parser, the per-answer orchestrator wiring, the evals pipeline's pure
+  logic, and KB retrieval. Run with `pytest`.
+- **`evals/`** — task baskets + graders + a leaderboard. Six baskets:
+  - **Planner** — deterministic slot/topic/difficulty scheduling (free).
+  - **Retriever** — topic filter + CV-aware rerank (free).
+  - **Director** — action-selection LLM-as-judge against an accepted-action
+    set (paid).
+  - **Interviewer** — selection (CV-overlap → chose a CV-tagged question),
+    CV anchoring (phrasing mentions the CV term), and reformulation fidelity
+    (an LLM judge confirms the paraphrase asks the same thing and does not
+    leak the answer) (paid).
+  - **Bias** — perturbation pairs for halo effect, length bias, lexical
+    mirroring of rubric phrasing, and position bias in the Interviewer (paid).
+  - **Follow-up rubric** — quality of the Director's LLM-generated rubric:
+    observable (≥2 concrete content criteria), self-consistent (the
+    Director's own reference answer satisfies its own rubric), and distinct
+    from the slot's curated rubric (paid).
+  - Plus an Evaluator v1-vs-v2 calibration against a 24-example human-
+    labelled golden set (Cohen's kappa).
+
+  Run with `python -m evals.run_evals` (free), add `--director`,
+  `--interviewer`, `--bias`, `--followup-rubric`, or `--all` for the paid
+  angles, or use `python -m evals.calibrate_evaluator` for the v1/v2 comparison.
 - **Observability** — every LLM call is traced to LangSmith when
   `LANGSMITH_API_KEY` is configured, and also appended to
   `logs/llm_calls.jsonl` regardless. See [`TESTING.md`](TESTING.md) for

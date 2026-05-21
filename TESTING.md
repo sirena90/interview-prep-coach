@@ -51,9 +51,13 @@ pytest -m "not llm"          # everything safe to run — fast + integration (80
 pytest tests/test_planner.py # run just one file
 pytest -k difficulty         # run tests whose name contains "difficulty"
 
-python -m evals.run_evals            # eval: planner + retriever (free)
-python -m evals.run_evals --director # eval: + the Director (real API calls)
-python -m evals.calibrate_evaluator  # eval: Evaluator v1 vs v2 (real API calls)
+python -m evals.run_evals                       # eval: planner + retriever (free)
+python -m evals.run_evals --director            # eval: + the Director agent (real API calls)
+python -m evals.run_evals --interviewer         # eval: + the Interviewer agent (real API calls)
+python -m evals.run_evals --bias                # eval: + the bias suite (real API calls)
+python -m evals.run_evals --followup-rubric     # eval: + the Director's follow-up rubric (real API calls)
+python -m evals.run_evals --all                 # eval: every basket above
+python -m evals.calibrate_evaluator             # eval: Evaluator v1 vs v2 (real API calls)
 ```
 
 A plain `pytest` run will **never** cost money or need the network — that is
@@ -63,17 +67,18 @@ python -m evals.run_evals
 
 ## 3. The test suite — `tests/`
 
-Seven files. Together: **73 fast tests + 7 integration tests = 80.**
+Eight files. Together: **~114 fast tests + 7 integration tests.**
 
-| File | Tests | What it checks | Needs |
-|---|---|---|---|
-| `test_models.py` | 19 | Data objects: score maths, validation rules | nothing |
-| `test_planner.py` | 13 | The question-scheduling logic | nothing |
-| `test_llm_wrapper.py` | 18 | The LLM wrapper + provider detection | nothing |
-| `test_agents_contract.py` | 14 | The 4 LLM agents (with a fake LLM) | nothing |
-| `test_cv_parser.py` | 9 | CV text extraction + parsing | nothing |
-| `test_kb_retrieval.py` | 7 | The knowledge base / search | `chromadb` |
-| `conftest.py` | — | Shared test setup (not tests itself) | — |
+| File | What it checks | Needs |
+|---|---|---|
+| `test_models.py` | Data objects: score maths, validation rules | nothing |
+| `test_planner.py` | The question-scheduling logic | nothing |
+| `test_llm_wrapper.py` | The LLM wrapper + provider detection | nothing |
+| `test_agents_contract.py` | The 4 LLM agents + follow-up validator (with a fake LLM) | nothing |
+| `test_app_flow.py` | The per-answer orchestrator wiring (which question gets graded, when a follow-up is installed, loop guard) | nothing |
+| `test_cv_parser.py` | CV text extraction + parsing | nothing |
+| `test_kb_retrieval.py` | The knowledge base / search | `chromadb` |
+| `conftest.py` | Shared test setup (not tests itself) | — |
 
 ### File-by-file
 
@@ -103,7 +108,20 @@ and costs money — so these tests swap in a **fake LLM** (see §6) that returns
 canned answers. That lets them check the *code around* the model for free:
 does the Evaluator's "v2" mode correctly combine three separate scores, does
 the Interviewer fall back safely if the model returns a bad ID, does the
-prompt actually include the candidate's CV.
+prompt actually include the candidate's CV. Also covers the runtime defences
+that gate the Director's LLM-generated follow-up rubric: `validate_followup_choice`
+must degrade to MOVE_ON when the reference answer fails self-consistency or
+when the follow-up fields are missing.
+
+**`test_app_flow.py`** — The orchestration seam between the Streamlit UI and
+the agents. `app.evaluate_and_decide` is a pure function (no `st.session_state`)
+that decides which question gets graded on each turn and whether a follow-up
+is installed for the next one. These tests lock in the wiring invariant that
+the previous version of the code got wrong: *if a follow-up question is
+active, the candidate's next answer is graded against the follow-up's rubric,
+not the original slot's rubric.* They are the regression net for that whole
+class of bug — exactly the kind of issue that earlier tests missed because
+each agent was tested in isolation but the wiring between them was not.
 
 **`test_cv_parser.py`** — `core/cv_parser.py` reads an uploaded CV. Tests
 cover the parts that don't need an LLM: extracting text from a file, cutting
@@ -131,12 +149,12 @@ the system on curated example sets and produces scores on a **leaderboard**.
 
 | File | What it is |
 |---|---|
-| `baskets.py` | The example sets ("task baskets") — planner, retriever, director |
+| `baskets.py` | The example sets ("task baskets") — planner, retriever, director, interviewer, bias, follow-up rubric |
 | `graders.py` | The scoring functions — one per eval angle |
 | `metrics.py` | Cohen's kappa (agreement metric, see §6) |
 | `leaderboard.py` | Collects scores into a comparison table |
 | `golden/evaluator_golden.jsonl` | 24 hand-labelled answers — the "correct" grades |
-| `run_evals.py` | Runs the planner / retriever / director evals |
+| `run_evals.py` | Runs the planner / retriever / director / interviewer / bias / follow-up rubric evals |
 | `calibrate_evaluator.py` | Compares Evaluator v1 vs v2 |
 | `langsmith_experiment.py` | Same comparison, uploaded to the LangSmith dashboard |
 
@@ -150,6 +168,34 @@ the system on curated example sets and produces scores on a **leaderboard**.
   situations and checks it picks a reasonable next action (move on, dig
   deeper, clarify…). Because an LLM's answer varies, each case allows a *set*
   of acceptable actions.
+- **Interviewer eval** (paid — real API) — runs the Interviewer agent on
+  hand-built candidate lists and grades three things:
+  *selection* (when one candidate carries a CV-overlapping skill_tag, does the
+  agent pick it?), *CV anchoring* (does the phrasing actually mention the CV
+  term?), and *reformulation fidelity* (an LLM judge confirms the paraphrase
+  asks the same thing and does not leak the answer).
+- **Bias eval** (paid — real API) — probes four biases by running the same
+  agent on a baseline input and a deliberately perturbed twin and checking
+  the score delta stays small:
+  - *halo effect* — append an unrelated confidence boast to a strong answer;
+    clarity and structure should not jump.
+  - *length bias* — pad a mediocre answer with filler; overall should not rise.
+  - *lexical mirroring* — an answer that parrots rubric phrases without
+    substance; content should still be modest (≤3).
+  - *position bias* — shuffle the Interviewer's candidate order; the chosen
+    id should be stable.
+- **Follow-up rubric eval** (paid — real API) — when the Director picks
+  `dig_deeper` / `followup` / `clarify`, it emits a rubric and a reference
+  answer for grading the candidate's next reply (Option B, see
+  [`ARCHITECTURE.md`](ARCHITECTURE.md) §4.7). That rubric is LLM-generated
+  and so needs quality measurement. The eval runs the Director on a few
+  curated cases and checks the rubric is:
+  - *observable* — ≥2 content criteria that are concrete enough to evaluate;
+  - *consistent* — the Director's own reference answer scores ≥4 against
+    its own rubric (same self-consistency check defence #3 enforces at
+    runtime);
+  - *distinct* — the generated criteria don't just duplicate the slot
+    question's curated rubric.
 - **Evaluator calibration** (paid — real API) — the big one. The Evaluator
   agent grades candidate answers; is it any good? `calibrate_evaluator.py`
   runs it over the 24 hand-labelled answers in `golden/` and measures how well
@@ -159,17 +205,22 @@ the system on curated example sets and produces scores on a **leaderboard**.
 ### Running it
 
 ```bash
-python -m evals.run_evals             # planner + retriever, free
-python -m evals.run_evals --director  # + Director eval, costs API credits
-python -m evals.calibrate_evaluator   # Evaluator v1 vs v2, costs API credits
+python -m evals.run_evals                       # planner + retriever, free
+python -m evals.run_evals --director            # + Director eval, costs API credits
+python -m evals.run_evals --interviewer         # + Interviewer eval, costs API credits
+python -m evals.run_evals --bias                # + bias eval, costs API credits
+python -m evals.run_evals --followup-rubric     # + follow-up rubric eval, costs API credits
+python -m evals.run_evals --all                 # every basket above
+python -m evals.calibrate_evaluator             # Evaluator v1 vs v2, costs API credits
 ```
 
 Each run prints a **leaderboard** — the point of an eval is comparison, so
 you rerun it after a change and compare rows.
 
-> The 24 grades in `golden/evaluator_golden.jsonl` are a **draft**. They are
-> the "ground truth" the Evaluator is measured against, so they should be
-> reviewed by a human before the calibration numbers are trusted.
+> The 24 grades in `golden/evaluator_golden.jsonl` have been reviewed against
+> the question rubrics and reference answers (all 24 verified correct — scores
+> and tiers match the rubric definitions). The golden set can be trusted as
+> ground truth for calibration runs.
 
 ---
 
@@ -186,9 +237,9 @@ By default `pytest` runs **neither** — `pytest.ini` deselects them. So:
 
 | Command | Runs |
 |---|---|
-| `pytest` | 73 fast tests only |
+| `pytest` | 121 fast tests only |
 | `pytest -m integration` | the 7 integration tests only |
-| `pytest -m "not llm"` | everything except paid — all 80 |
+| `pytest -m "not llm"` | everything except paid — all 128 |
 
 This is the safety net: someone can clone the repo and run `pytest` with no
 API key, no network, and no cost.
@@ -235,6 +286,10 @@ combines the scores. The calibration eval exists to measure which is better.
 | `pytest` (any marker) | **Free** — never calls a real LLM |
 | `python -m evals.run_evals` (no flag) | **Free** — planner + retriever only |
 | `python -m evals.run_evals --director` | **Paid** — real API calls |
+| `python -m evals.run_evals --interviewer` | **Paid** — real API calls |
+| `python -m evals.run_evals --bias` | **Paid** — real API calls |
+| `python -m evals.run_evals --followup-rubric` | **Paid** — real API calls |
+| `python -m evals.run_evals --all` | **Paid** — every basket above |
 | `python -m evals.calibrate_evaluator` | **Paid** — ~100 API calls |
 | `python -m evals.langsmith_experiment` | **Paid** + needs a LangSmith key |
 
@@ -283,7 +338,8 @@ tests/
   test_models.py            Data objects: score maths, validation
   test_planner.py           Question-scheduling rules
   test_llm_wrapper.py       LLM wrapper + provider auto-detection
-  test_agents_contract.py   The 4 LLM agents (fake LLM)
+  test_agents_contract.py   The 4 LLM agents + follow-up validator (fake LLM)
+  test_app_flow.py          Per-answer orchestrator wiring (fake LLM)
   test_cv_parser.py         CV extraction + parsing
   test_kb_retrieval.py      Knowledge-base search (integration)
 
@@ -292,7 +348,7 @@ evals/
   graders.py                Scoring functions
   metrics.py                Cohen's kappa
   leaderboard.py            The comparison table
-  run_evals.py              Run planner / retriever / director evals
+  run_evals.py              Run planner / retriever / director / interviewer / bias evals
   calibrate_evaluator.py    Evaluator v1 vs v2 calibration
   langsmith_experiment.py   Calibration as a LangSmith experiment
   golden/
