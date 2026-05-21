@@ -102,6 +102,9 @@ def init_app_state() -> None:
         st.session_state.current_slot = None       # the active TurnPlan
         st.session_state.chat_messages = []        # list of {role, content}
         st.session_state.director_rounds = 0       # follow-up rounds within current question
+        st.session_state.slot_first_answer = None  # first answer to the current slot
+        st.session_state.slot_score_report = None  # score of the first answer to the current slot
+        st.session_state.slot_followup_answers = []  # any clarifications after the first answer
         st.session_state.final_summary = None      # SessionSummary at end
         st.session_state.cv_profile = None         # CVProfile from upload
 
@@ -238,6 +241,12 @@ def _advance_to_next_question() -> None:
     plan: TurnPlan = planner.plan_next_turn(state)
     st.session_state.current_slot = plan
     st.session_state.director_rounds = 0
+    # Reset per-slot answer/score caches — only the first answer is evaluated
+    # per slot; follow-up clarifications reuse the first score and are
+    # appended to the answer text at commit time.
+    st.session_state.slot_first_answer = None
+    st.session_state.slot_score_report = None
+    st.session_state.slot_followup_answers = []
 
     # Retrieve candidate questions
     if plan.slot_type == SlotType.BEHAVIORAL:
@@ -304,16 +313,28 @@ def _handle_user_answer(answer: str) -> None:
     # Show user answer
     st.session_state.chat_messages.append({"role": "user", "content": answer})
 
-    # Evaluate
-    with st.spinner("Evaluating your answer..."):
-        score_report: ScoreReport = agents["evaluator"].evaluate(
-            question=question,
-            user_answer=answer,
-        )
+    is_first_turn_in_slot = st.session_state.slot_score_report is None
 
-    # Render feedback
-    feedback_md = _format_feedback(score_report)
-    st.session_state.chat_messages.append({"role": "assistant", "content": feedback_md})
+    if is_first_turn_in_slot:
+        # Evaluate the first answer to this slot — the score sticks for the
+        # whole slot, even if the Director asks a follow-up afterwards.
+        with st.spinner("Evaluating your answer..."):
+            score_report: ScoreReport = agents["evaluator"].evaluate(
+                question=question,
+                user_answer=answer,
+            )
+        st.session_state.slot_first_answer = answer
+        st.session_state.slot_score_report = score_report
+
+        # Render feedback once, after the first answer.
+        feedback_md = _format_feedback(score_report)
+        st.session_state.chat_messages.append({"role": "assistant", "content": feedback_md})
+    else:
+        # Follow-up answer — reuse the original score (clarifications are not
+        # rubric-graded on their own; we'd unfairly penalise a one-sentence
+        # clarification against e.g. a full STAR rubric).
+        score_report = st.session_state.slot_score_report
+        st.session_state.slot_followup_answers.append(answer)
 
     # Director — only after the first round on this Q (subsequent rounds also call it)
     history_summary = _summarise_director_history()
@@ -339,8 +360,14 @@ def _handle_user_answer(answer: str) -> None:
         st.session_state.director_rounds += 1
         return
 
-    # MOVE_ON: persist this turn and advance
-    _commit_turn(answer, score_report)
+    # MOVE_ON: persist this turn and advance.
+    # The committed answer is the first answer plus any clarifications, so
+    # the Coach sees the full picture in the final report. The score remains
+    # the one computed on the first answer.
+    combined_answer = st.session_state.slot_first_answer or answer
+    for extra in st.session_state.slot_followup_answers:
+        combined_answer += f"\n\n[Clarification] {extra}"
+    _commit_turn(combined_answer, score_report)
 
     if state.turn_count() >= state.target_turns:
         _finish_session()
