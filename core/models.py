@@ -163,6 +163,7 @@ class InterviewerChoice(BaseModel):
     """Interviewer agent output: which candidate was picked + phrasing."""
     id: str
     phrased: str = Field(min_length=3)
+    cv_signal_used: Optional[str] = None
 
 
 class DirectorChoice(BaseModel):

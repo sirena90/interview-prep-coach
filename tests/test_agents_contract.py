@@ -4,6 +4,8 @@ These run with FakeLLM (no API calls). They check the deterministic glue
 around each agent: prompt assembly, defensive fallbacks, and how v2's
 per-criterion scores are combined in code.
 """
+from secrets import choice
+
 import pytest
 
 from core.agents import (
@@ -26,6 +28,7 @@ from core.models import (
     SlotType,
     Topic,
 )
+from tests.conftest import fake_llm, make_question
 
 
 class TestInterviewerAgent:
@@ -71,6 +74,43 @@ class TestInterviewerAgent:
             cv_profile=make_cv(skills=["PostgreSQL"]),
         )
         assert "PostgreSQL" in fake_llm.calls[0].user
+
+    def test_cv_signal_declared_when_cv_provided(self, fake_llm, make_question, make_cv):
+        c1, c2 = make_question(qid="real-1"), make_question(qid="real-2")
+    
+        fake_llm.queue(
+            InterviewerChoice,
+            InterviewerChoice(id="real-1", phrased="Tell me about indexes.", cv_signal_used="PostgreSQL")
+        )
+    
+        choice = InterviewerAgent().ask(
+            candidates=[c1, c2],
+            topic=Topic.SQL,
+            difficulty=Difficulty.MID,
+            cv_profile=make_cv(skills=["PostgreSQL"]),
+        )
+    
+        assert choice.cv_signal_used == "PostgreSQL"
+    def test_cv_signal_none_when_no_cv_provided(self, fake_llm, make_question):
+        c1, c2 = make_question(qid="real-1"), make_question(qid="real-2")
+        fake_llm.queue(
+            InterviewerChoice,
+            InterviewerChoice(id="real-1", phrased="Tell me about indexes.", cv_signal_used=None)
+        )
+        choice = InterviewerAgent().ask(
+            candidates=[c1, c2],
+            topic=Topic.SQL,
+            difficulty=Difficulty.MID,
+        )
+    
+        assert choice.cv_signal_used is None
+    def test_single_candidate_fast_path_has_no_cv_signal(self, make_question):
+        c1 = make_question(qid="only-one")
+        choice = InterviewerAgent().ask(
+            candidates=[c1], topic=Topic.SQL, difficulty=Difficulty.MID
+        )
+        assert choice.id == "only-one"
+        assert choice.cv_signal_used is None
 
     def test_raises_when_no_candidates(self, fake_llm):
         with pytest.raises(ValueError):

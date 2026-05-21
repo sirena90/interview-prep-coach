@@ -121,7 +121,7 @@ class InterviewerAgent:
         # Defensive: if the model invented an id not in candidates, fall back.
         valid_ids = {q.id for q in candidates}
         if choice.id not in valid_ids:
-            return InterviewerChoice(id=candidates[0].id, phrased=candidates[0].question)
+            return InterviewerChoice(id=candidates[0].id, phrased=candidates[0].question, cv_signal_used=None)
         return choice
 
 
