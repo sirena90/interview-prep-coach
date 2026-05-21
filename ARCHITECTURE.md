@@ -214,8 +214,12 @@ Four LLM agents, each with one job:
 #### InterviewerAgent
 - **Input:** list of candidate questions from the Retriever + CV profile
 - **Output:** `InterviewerChoice(id, phrased)`
-- **Job:** pick one candidate and paraphrase it naturally, optionally referencing the CV
-- **Fast path:** if there is only one candidate, no LLM call
+- **Job:** pick one candidate and paraphrase it naturally, anchoring the phrasing
+  in the CV whenever there is any reasonable overlap (CV anchoring is the
+  default behaviour, not the exception)
+- **UI surfacing:** when the chosen question's `skill_tags` overlap the CV
+  skills, the UI shows a one-line caption ("📄 Picked from your CV: ...") so
+  the user can see that the CV actually affected what was asked
 - **Defensive:** if the LLM invents an id not in the candidates → falls back to the first
 
 #### EvaluatorAgent
@@ -291,7 +295,7 @@ provider-agnostic, so this works on Anthropic, OpenAI, or Mistral.
 - Evaluator (LLM-as-judge)
 - CV Parser (LLM-as-extractor)
 
-Total **~20 LLM calls per session** (1 CV parse + 5 × Evaluator + 5 × Director + 5 × Interviewer when there are multiple candidates + 1 Coach + a small number of Coach tool-call rounds). The Evaluator's v2 mode adds 2 extra calls per turn.
+Total **~20 LLM calls per session** (1 CV parse + 5 × Evaluator + 5 × Director + 5 × Interviewer + 1 Coach + a small number of Coach tool-call rounds). The Evaluator's v2 mode adds 2 extra calls per turn.
 
 ---
 
@@ -448,11 +452,23 @@ responsibility principle for agents.
   wrapper (rate-limit retry, repair, tool use), the four agents, the CV
   parser, the evals pipeline's pure logic, and KB retrieval. Run with
   `pytest`.
-- **`evals/`** — task baskets + graders + a leaderboard. Covers planner,
-  retriever, the Director agent, and an Evaluator v1-vs-v2 calibration
-  against a 24-example human-labelled golden set (Cohen's kappa). Run with
-  `python -m evals.run_evals` (free) or
-  `python -m evals.calibrate_evaluator` (paid).
+- **`evals/`** — task baskets + graders + a leaderboard. Five baskets:
+  - **Planner** — deterministic slot/topic/difficulty scheduling (free).
+  - **Retriever** — topic filter + CV-aware rerank (free).
+  - **Director** — action-selection LLM-as-judge against an accepted-action
+    set (paid).
+  - **Interviewer** — selection (CV-overlap → chose a CV-tagged question),
+    CV anchoring (phrasing mentions the CV term), and reformulation fidelity
+    (an LLM judge confirms the paraphrase asks the same thing and does not
+    leak the answer) (paid).
+  - **Bias** — perturbation pairs for halo effect, length bias, lexical
+    mirroring of rubric phrasing, and position bias in the Interviewer (paid).
+  - Plus an Evaluator v1-vs-v2 calibration against a 24-example human-
+    labelled golden set (Cohen's kappa).
+
+  Run with `python -m evals.run_evals` (free), add `--director`,
+  `--interviewer`, `--bias`, or `--all` for the paid angles, or use
+  `python -m evals.calibrate_evaluator` for the v1/v2 comparison.
 - **Observability** — every LLM call is traced to LangSmith when
   `LANGSMITH_API_KEY` is configured, and also appended to
   `logs/llm_calls.jsonl` regardless. See [`TESTING.md`](TESTING.md) for

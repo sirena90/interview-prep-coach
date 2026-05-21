@@ -282,12 +282,32 @@ def _advance_to_next_question() -> None:
     }[plan.slot_type]
 
     q_num = state.turn_count() + 1
+    cv_match_line = _cv_match_caption(question, cv)
     header = (
         f"### Q{q_num} — {slot_label}\n"
-        f"*Topic: {plan.topic.value} · Difficulty: {plan.difficulty.value}*\n\n"
+        f"*Topic: {plan.topic.value} · Difficulty: {plan.difficulty.value}*\n"
+        f"{cv_match_line}\n"
         f"{choice.phrased}"
     )
     st.session_state.chat_messages.append({"role": "assistant", "content": header})
+
+
+def _cv_match_caption(question, cv: CVProfile | None) -> str:
+    """Return a one-line caption showing which CV skills drove this choice.
+
+    Empty string when there's no overlap or no CV — keeps the header clean.
+    Surfaces the otherwise-invisible CV-aware reranking so the user can see
+    that uploading their CV actually changed what they were asked.
+    """
+    if cv is None or not cv.skills or not question.skill_tags:
+        return ""
+    tag_set = {t.lower().strip() for t in question.skill_tags}
+    # Preserve the user's original CV casing in the displayed match.
+    matched = [s for s in cv.skills if s.lower().strip() in tag_set]
+    if not matched:
+        return ""
+    rendered = ", ".join(f"**{s}**" for s in matched[:4])
+    return f"\n> 📄 Picked from your CV: {rendered}\n"
 
 
 def _handle_user_answer(answer: str) -> None:

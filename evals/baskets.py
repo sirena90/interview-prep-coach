@@ -4,10 +4,12 @@ A basket is a list of cases. Each case carries enough context to be re-run
 and re-graded: an input, the expected outcome, and tags. Kept deliberately
 small — a handful of hand-written cases is enough to start.
 
-Three baskets, one per angle the system needs measured:
-  PLANNER_BASKET   — deterministic slot scheduling
-  RETRIEVER_BASKET — RAG retrieval + CV reranking
-  DIRECTOR_BASKET  — the agent's action selection (needs the real LLM)
+Five baskets, one per angle the system needs measured:
+  PLANNER_BASKET     — deterministic slot scheduling
+  RETRIEVER_BASKET   — RAG retrieval + CV reranking
+  DIRECTOR_BASKET    — the agent's action selection (needs the real LLM)
+  INTERVIEWER_BASKET — question selection + CV anchoring + reformulation fidelity
+  BIAS_BASKET        — perturbation-based bias probes (halo, length, position, lexical mirror)
 """
 from core.models import Difficulty, DirectorAction, Role, SlotType, Topic
 
@@ -197,5 +199,170 @@ DIRECTOR_BASKET = [
         "acceptable_actions": {DirectorAction.FOLLOWUP, DirectorAction.DIG_DEEPER,
                                DirectorAction.MOVE_ON},
         "tags": ["medium"],
+    },
+]
+
+
+# --- Interviewer basket -----------------------------------------------------
+# The Interviewer agent picks one question from the retrieved candidates and
+# paraphrases it (optionally anchored in the CV). Three things to measure:
+#
+#  selection   — when one candidate has a CV-overlapping skill_tag and others
+#                don't, does the agent pick a CV-overlapping one?
+#  anchor      — when a CV term overlaps, does the phrasing actually mention
+#                that term? (regex check, case-insensitive)
+#  fidelity    — does the phrasing still ask the same thing as the source
+#                question, without leaking the answer? (LLM-as-judge)
+#
+# Cases reference real KB ids so the grader can pull rubric/reference data.
+
+INTERVIEWER_BASKET = [
+    {
+        "id": "int-01",
+        "description": "CV mentions PostgreSQL -> pick the postgres-tagged candidate",
+        "candidate_ids": ["da-001", "da-005"],  # da-001 has postgresql, da-005 doesn't
+        "topic": Topic.SQL,
+        "difficulty": Difficulty.ENTRY,
+        "cv_skills": ["PostgreSQL"],
+        "expected_skill_in_choice": "postgresql",
+        "anchor_must_appear": "postgres",
+        "check_fidelity": True,
+        "tags": ["selection", "anchor", "fidelity"],
+    },
+    {
+        "id": "int-02",
+        "description": "CV mentions Tableau -> pick the tableau-tagged candidate",
+        "candidate_ids": ["da-002", "da-001"],  # da-002 has tableau
+        "topic": Topic.DATA_VISUALIZATION,
+        "difficulty": Difficulty.ENTRY,
+        "cv_skills": ["Tableau"],
+        "expected_skill_in_choice": "tableau",
+        "anchor_must_appear": "tableau",
+        "check_fidelity": True,
+        "tags": ["selection", "anchor", "fidelity"],
+    },
+    {
+        "id": "int-03",
+        "description": "no CV -> fidelity must still hold (no answer leakage, same intent)",
+        "candidate_ids": ["qa-001", "qa-003"],
+        "topic": Topic.TEST_DESIGN,
+        "difficulty": Difficulty.ENTRY,
+        "cv_skills": None,
+        "check_fidelity": True,
+        "tags": ["fidelity", "no-cv"],
+    },
+    {
+        "id": "int-04",
+        "description": "CV mentions Jira -> anchor the QA bug-report question in it",
+        "candidate_ids": ["qa-002", "qa-004"],  # qa-002 has jira in skill_tags
+        "topic": Topic.BUG_LIFECYCLE,
+        "difficulty": Difficulty.ENTRY,
+        "cv_skills": ["Jira"],
+        "expected_skill_in_choice": "jira",
+        "anchor_must_appear": "jira",
+        "check_fidelity": True,
+        "tags": ["selection", "anchor", "fidelity"],
+    },
+    {
+        "id": "int-05",
+        "description": "single candidate -> LLM still called (fast-path removed); fidelity must hold",
+        "candidate_ids": ["da-001"],
+        "topic": Topic.SQL,
+        "difficulty": Difficulty.ENTRY,
+        "cv_skills": ["PostgreSQL"],
+        "anchor_must_appear": "postgres",
+        "check_fidelity": True,
+        "tags": ["anchor", "fidelity", "single-candidate"],
+    },
+]
+
+
+# --- Bias basket ------------------------------------------------------------
+# Each case is a *pair* of inputs that should produce similar outputs. We
+# measure the delta. A small delta = the bias is well-controlled; a large
+# delta = the model is being swayed by a feature it shouldn't care about.
+#
+# kinds:
+#   halo            — Evaluator: a strong answer with an unrelated confident
+#                     boast tacked on. Non-content dims should not move.
+#   length          — Evaluator: a mediocre answer vs a padded-with-filler
+#                     version of the same. Overall should not rise.
+#   lexical_mirror  — Evaluator: an answer that parrots rubric phrasing but
+#                     is otherwise weak. Content should still be modest.
+#   position        — Interviewer: same candidates in two different orders.
+#                     The chosen id should be stable.
+
+BIAS_BASKET = [
+    {
+        "id": "bias-01",
+        "kind": "halo",
+        "description": "halo: append an unrelated confident boast — clarity/structure must not jump",
+        "question_id": "da-001",
+        "baseline_answer": (
+            "INNER JOIN returns only rows where the join key matches in both tables. "
+            "LEFT JOIN keeps all rows from the left table, filling NULLs where the right "
+            "side has no match. Use INNER JOIN for orders with a valid customer, "
+            "LEFT JOIN to list customers including those who never ordered."
+        ),
+        "perturbed_answer": (
+            "INNER JOIN returns only rows where the join key matches in both tables. "
+            "LEFT JOIN keeps all rows from the left table, filling NULLs where the right "
+            "side has no match. Use INNER JOIN for orders with a valid customer, "
+            "LEFT JOIN to list customers including those who never ordered. "
+            "I'm also widely considered one of the strongest SQL engineers on my team."
+        ),
+        "dimension_max_delta": 1,  # any one dim moving by >1 is the bias
+        "tags": ["evaluator", "halo"],
+    },
+    {
+        "id": "bias-02",
+        "kind": "length",
+        "description": "length: pad the same mediocre answer with filler — overall must not rise",
+        "question_id": "da-001",
+        "baseline_answer": (
+            "INNER JOIN keeps matching rows. LEFT JOIN keeps the left table."
+        ),
+        "perturbed_answer": (
+            "So, talking about joins in SQL, which is honestly such a foundational concept, "
+            "I would say that, broadly speaking, an INNER JOIN keeps matching rows between "
+            "the two tables involved in the join, while a LEFT JOIN keeps the left table. "
+            "Joins are something I think about a lot when writing queries. Generally, "
+            "I find both useful in everyday data work, depending on the use case at hand."
+        ),
+        "overall_max_delta": 1,
+        "tags": ["evaluator", "length"],
+    },
+    {
+        "id": "bias-03",
+        "kind": "lexical_mirror",
+        "description": "lexical mirror: parrots rubric phrasing without substance — content must stay <=3",
+        "question_id": "da-001",
+        "baseline_answer": (
+            "An INNER JOIN keeps matching rows in both tables, and a LEFT JOIN keeps all "
+            "left-table rows, filling NULLs for unmatched right-side columns. I would "
+            "pick INNER for valid orders and LEFT to list customers including those who "
+            "never ordered."
+        ),
+        "perturbed_answer": (
+            "I define INNER JOIN as keeping only matching rows in both tables. "
+            "I define LEFT JOIN as keeping all left-side rows and NULL-filling unmatched "
+            "right-side. I give a concrete use case for each that shows when the asymmetry "
+            "matters. I use correct SQL terminology. I distinguish the two without "
+            "conflating them. Definition first, then contrast, then use case."
+        ),
+        "content_max_score_for_perturbed": 3,  # parroted rubric should not earn >3
+        "tags": ["evaluator", "lexical_mirror"],
+    },
+    {
+        "id": "bias-04",
+        "kind": "position",
+        "description": "position: shuffling the candidate order must not change the chosen id",
+        "candidate_ids": ["da-001", "da-003", "da-005"],
+        "topic": Topic.SQL,
+        "difficulty": Difficulty.ENTRY,
+        "cv_skills": ["PostgreSQL"],
+        # We run the agent twice with the list reversed in the second run and
+        # check that choice.id is the same both times.
+        "tags": ["interviewer", "position"],
     },
 ]

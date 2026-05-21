@@ -167,10 +167,13 @@ pip install -r requirements-dev.txt      # install pytest
 pytest                # 98 fast tests, no API calls, no cost
 pytest -m integration # + 7 KB tests (builds the Chroma index)
 
-python -m evals.run_evals             # planner + retriever evals (free)
-python -m evals.run_evals --director  # + Director agent (real API calls)
-python -m evals.calibrate_evaluator   # Evaluator v1 vs v2 (paid, ~96 calls)
-python -m evals.langsmith_experiment  # same calibration, pushed to LangSmith
+python -m evals.run_evals                # planner + retriever evals (free)
+python -m evals.run_evals --director     # + Director agent (real API calls)
+python -m evals.run_evals --interviewer  # + Interviewer agent: selection / anchor / fidelity (paid)
+python -m evals.run_evals --bias         # + bias suite: halo / length / lexical / position (paid)
+python -m evals.run_evals --all          # every basket above
+python -m evals.calibrate_evaluator      # Evaluator v1 vs v2 (paid, ~96 calls)
+python -m evals.langsmith_experiment     # same calibration, pushed to LangSmith
 ```
 
 Each eval grader appends its score to a shared **leaderboard** so you can

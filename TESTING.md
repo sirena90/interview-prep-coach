@@ -51,9 +51,12 @@ pytest -m "not llm"          # everything safe to run — fast + integration (80
 pytest tests/test_planner.py # run just one file
 pytest -k difficulty         # run tests whose name contains "difficulty"
 
-python -m evals.run_evals            # eval: planner + retriever (free)
-python -m evals.run_evals --director # eval: + the Director (real API calls)
-python -m evals.calibrate_evaluator  # eval: Evaluator v1 vs v2 (real API calls)
+python -m evals.run_evals                # eval: planner + retriever (free)
+python -m evals.run_evals --director     # eval: + the Director agent (real API calls)
+python -m evals.run_evals --interviewer  # eval: + the Interviewer agent (real API calls)
+python -m evals.run_evals --bias         # eval: + the bias suite (real API calls)
+python -m evals.run_evals --all          # eval: every basket above
+python -m evals.calibrate_evaluator      # eval: Evaluator v1 vs v2 (real API calls)
 ```
 
 A plain `pytest` run will **never** cost money or need the network — that is
@@ -131,12 +134,12 @@ the system on curated example sets and produces scores on a **leaderboard**.
 
 | File | What it is |
 |---|---|
-| `baskets.py` | The example sets ("task baskets") — planner, retriever, director |
+| `baskets.py` | The example sets ("task baskets") — planner, retriever, director, interviewer, bias |
 | `graders.py` | The scoring functions — one per eval angle |
 | `metrics.py` | Cohen's kappa (agreement metric, see §6) |
 | `leaderboard.py` | Collects scores into a comparison table |
 | `golden/evaluator_golden.jsonl` | 24 hand-labelled answers — the "correct" grades |
-| `run_evals.py` | Runs the planner / retriever / director evals |
+| `run_evals.py` | Runs the planner / retriever / director / interviewer / bias evals |
 | `calibrate_evaluator.py` | Compares Evaluator v1 vs v2 |
 | `langsmith_experiment.py` | Same comparison, uploaded to the LangSmith dashboard |
 
@@ -150,6 +153,22 @@ the system on curated example sets and produces scores on a **leaderboard**.
   situations and checks it picks a reasonable next action (move on, dig
   deeper, clarify…). Because an LLM's answer varies, each case allows a *set*
   of acceptable actions.
+- **Interviewer eval** (paid — real API) — runs the Interviewer agent on
+  hand-built candidate lists and grades three things:
+  *selection* (when one candidate carries a CV-overlapping skill_tag, does the
+  agent pick it?), *CV anchoring* (does the phrasing actually mention the CV
+  term?), and *reformulation fidelity* (an LLM judge confirms the paraphrase
+  asks the same thing and does not leak the answer).
+- **Bias eval** (paid — real API) — probes four biases by running the same
+  agent on a baseline input and a deliberately perturbed twin and checking
+  the score delta stays small:
+  - *halo effect* — append an unrelated confidence boast to a strong answer;
+    clarity and structure should not jump.
+  - *length bias* — pad a mediocre answer with filler; overall should not rise.
+  - *lexical mirroring* — an answer that parrots rubric phrases without
+    substance; content should still be modest (≤3).
+  - *position bias* — shuffle the Interviewer's candidate order; the chosen
+    id should be stable.
 - **Evaluator calibration** (paid — real API) — the big one. The Evaluator
   agent grades candidate answers; is it any good? `calibrate_evaluator.py`
   runs it over the 24 hand-labelled answers in `golden/` and measures how well
@@ -159,9 +178,12 @@ the system on curated example sets and produces scores on a **leaderboard**.
 ### Running it
 
 ```bash
-python -m evals.run_evals             # planner + retriever, free
-python -m evals.run_evals --director  # + Director eval, costs API credits
-python -m evals.calibrate_evaluator   # Evaluator v1 vs v2, costs API credits
+python -m evals.run_evals                # planner + retriever, free
+python -m evals.run_evals --director     # + Director eval, costs API credits
+python -m evals.run_evals --interviewer  # + Interviewer eval, costs API credits
+python -m evals.run_evals --bias         # + bias eval, costs API credits
+python -m evals.run_evals --all          # every basket above
+python -m evals.calibrate_evaluator      # Evaluator v1 vs v2, costs API credits
 ```
 
 Each run prints a **leaderboard** — the point of an eval is comparison, so
@@ -235,6 +257,9 @@ combines the scores. The calibration eval exists to measure which is better.
 | `pytest` (any marker) | **Free** — never calls a real LLM |
 | `python -m evals.run_evals` (no flag) | **Free** — planner + retriever only |
 | `python -m evals.run_evals --director` | **Paid** — real API calls |
+| `python -m evals.run_evals --interviewer` | **Paid** — real API calls |
+| `python -m evals.run_evals --bias` | **Paid** — real API calls |
+| `python -m evals.run_evals --all` | **Paid** — every basket above |
 | `python -m evals.calibrate_evaluator` | **Paid** — ~100 API calls |
 | `python -m evals.langsmith_experiment` | **Paid** + needs a LangSmith key |
 
@@ -292,7 +317,7 @@ evals/
   graders.py                Scoring functions
   metrics.py                Cohen's kappa
   leaderboard.py            The comparison table
-  run_evals.py              Run planner / retriever / director evals
+  run_evals.py              Run planner / retriever / director / interviewer / bias evals
   calibrate_evaluator.py    Evaluator v1 vs v2 calibration
   langsmith_experiment.py   Calibration as a LangSmith experiment
   golden/

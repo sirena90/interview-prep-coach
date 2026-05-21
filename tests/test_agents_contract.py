@@ -26,13 +26,19 @@ from core.models import (
 
 
 class TestInterviewerAgent:
-    def test_single_candidate_skips_the_llm(self, fake_llm, make_question):
+    def test_single_candidate_still_calls_the_llm(self, fake_llm, make_question):
+        # Even with a single candidate we call the LLM so it can paraphrase the
+        # question and anchor it in the CV. The fast path was removed because it
+        # caused the user-visible "CV was ignored" symptom.
         q = make_question(qid="only-1")
+        fake_llm.queue(InterviewerChoice,
+                       InterviewerChoice(id="only-1", phrased="Tell me about joins."))
         choice = InterviewerAgent().ask(
             candidates=[q], topic=Topic.SQL, difficulty=Difficulty.MID
         )
         assert choice.id == "only-1"
-        assert fake_llm.call_count == 0  # fast path: no LLM call
+        assert choice.phrased == "Tell me about joins."
+        assert fake_llm.call_count == 1
 
     def test_invented_id_falls_back_to_first_candidate(self, fake_llm, make_question):
         c1, c2 = make_question(qid="real-1"), make_question(qid="real-2")
