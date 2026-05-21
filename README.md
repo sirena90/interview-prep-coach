@@ -44,7 +44,15 @@ source .venv/bin/activate    # Mac / Linux
 
 # Install
 pip install -r requirements.txt
+
+# (Optional) tests + eval pipeline — adds pytest and coverage
+pip install -r requirements-dev.txt
 ```
+
+> Two requirements files on purpose: `requirements.txt` is what you need
+> **to run the app**; `requirements-dev.txt` adds **test/eval** tooling
+> (pytest, pytest-cov). If you're just running the coach, the first file is
+> enough.
 
 ### 2. API key
 
@@ -77,12 +85,47 @@ streamlit run app.py
 
 The browser opens automatically at `http://localhost:8501`.
 
-## What to prepare
+## How to use (for the candidate)
 
-- **A CV** as a PDF or .txt file. Easiest path: **export your LinkedIn
-  profile as PDF** (Profile → More → Save to PDF).
-- If you don't have a LinkedIn profile, write a small .txt with your skills,
-  experience and projects (200–300 words is enough).
+### Before you start
+
+- Have a **CV** ready as a PDF or .txt file. Easiest path: **export your
+  LinkedIn profile as PDF** (Profile → More → Save to PDF).
+- No LinkedIn? Write a short .txt with your skills, experience and projects
+  (200–300 words is enough).
+
+### Walkthrough
+
+You'll see three screens in sequence.
+
+**1. Setup** — pick your **role** (Data Analyst, QA, Data Engineer, Frontend
+Developer), pick a **difficulty** (entry / mid / senior), upload your **CV**,
+then click *Start interview*. The app parses your CV once (you'll see a brief
+spinner) and starts the session.
+
+**2. Interview** — a chat screen for the 5-question session.
+- The header shows your role, difficulty, and progress (`Question 2 of 5`).
+- Each question carries a small caption — *Topic: …, Difficulty: …* — and,
+  when your CV matches the question, a *📄 Picked from your CV: …* badge so
+  you can see which of your skills drove the choice.
+- Type your answer in the chat box and press Enter.
+- After each answer you get a **structured score**: overall 1–5, plus per-
+  dimension scores (content / clarity / structure), short comments per
+  dimension, and 2–4 concrete tips under *Improve:*.
+- Sometimes the coach will follow up on the same question (a `dig_deeper`,
+  `followup`, or `clarify` round) before moving on — you'll see a small
+  label like `(dig_deeper)` above the new question. Each slot is capped at
+  one follow-up to keep the session short.
+
+**3. Final report** — once the 5 questions are done, you get:
+- an **overall score** and a per-topic breakdown,
+- **strengths** and **gaps** with the turn number each one came from,
+- **study suggestions** the coach grounds in real reference answers from
+  the knowledge base,
+- and a short **personal coaching letter** that references your CV
+  experience.
+
+Click *Start a new session* to wipe the state and run another session.
 
 ## Architecture in short
 
