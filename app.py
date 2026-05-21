@@ -36,6 +36,8 @@ from core.models import (
     DimensionScore,
     DirectorAction,
     Difficulty,
+    Question,
+    Rubric,
     RollingScore,
     Role,
     ScoreReport,
@@ -227,10 +229,8 @@ def render_interview() -> None:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    # Skip button — for the candidate who genuinely doesn't know. Commits a
-    # placeholder low-score turn (no LLM call) so the topic still registers
-    # as a weak area in the final report, then advances.
-    if st.button("⏭️ I don't know — skip this question",
+    # Skip button — only shown when a real question is active.
+    if st.session_state.current_question is not None and st.button("⏭️ I don't know — skip this question",
                  help="Move on without answering. Counts as a weak attempt "
                       "for this topic, no feedback is generated."):
         _skip_current_question()
@@ -273,11 +273,39 @@ def _advance_to_next_question() -> None:
         )
 
     if not candidates:
-        # Defensive: skip this slot if KB exhausted
+        # KB exhausted for this slot — advance without penalising the candidate.
+        # We still need a TurnRecord to keep turn_count() correct, so we commit
+        # a neutral placeholder that won't drag down the final report.
         st.session_state.chat_messages.append({
             "role": "assistant",
-            "content": "_(no questions available for this slot; advancing)_",
+            "content": "_(no questions available for this slot — skipping without penalty)_",
         })
+        placeholder_q = Question(
+            id=f"__empty_{plan.slot_type.value}__",
+            question="(no question available)",
+            topic=plan.topic,
+            subtopic="",
+            difficulty=plan.difficulty,
+            slot_type=plan.slot_type,
+            reference_answer="",
+            rubric=Rubric(content=[], clarity=[], structure=[]),
+            tags=[],
+        )
+        st.session_state.current_question = placeholder_q
+        state.current_question_id = placeholder_q.id
+        neutral_report = ScoreReport(
+            content=DimensionScore(score=3, comment="no question"),
+            clarity=DimensionScore(score=3, comment="no question"),
+            structure=DimensionScore(score=3, comment="no question"),
+            actionable_feedback=[],
+            overall=3,
+        )
+        _commit_turn("(no question available)", neutral_report)
+        st.session_state.current_question = None
+        if state.turn_count() >= state.target_turns:
+            _finish_session()
+        else:
+            _advance_to_next_question()
         return
 
     # Interviewer picks + paraphrases
