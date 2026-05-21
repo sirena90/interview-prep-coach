@@ -25,8 +25,6 @@ from core.agents import (
     CoachingSummariserAgent,
     EvaluatorAgent,
     InterviewerAgent,
-    build_followup_question,
-    validate_followup_choice,
 )
 from core.cv_parser import extract_cv_text, parse_cv
 from core.kb import KnowledgeBase
@@ -104,11 +102,12 @@ def init_app_state() -> None:
         st.session_state.phase = "setup"           # setup / interview / done
         st.session_state.session = None            # SessionState (Pydantic)
         st.session_state.current_question = None   # the slot's KB Question
-        st.session_state.followup_question = None  # synthesised Question for an active follow-up
         st.session_state.current_slot = None       # the active TurnPlan
         st.session_state.chat_messages = []        # list of {role, content}
         st.session_state.director_rounds = 0       # follow-up rounds within current question
-        st.session_state.slot_answers = []         # all answers given in the current slot
+        st.session_state.slot_first_answer = None  # first answer in the current slot
+        st.session_state.slot_score_report = None  # score of the first answer
+        st.session_state.slot_followup_answers = []  # clarifications after the first answer
         st.session_state.final_summary = None      # SessionSummary at end
         st.session_state.final_summary_error = None  # last Coach failure, if any
         st.session_state.fatal_error = None        # last unhandled exception in a phase
@@ -255,8 +254,9 @@ def _advance_to_next_question() -> None:
     plan: TurnPlan = planner.plan_next_turn(state)
     st.session_state.current_slot = plan
     st.session_state.director_rounds = 0
-    st.session_state.followup_question = None
-    st.session_state.slot_answers = []
+    st.session_state.slot_first_answer = None
+    st.session_state.slot_score_report = None
+    st.session_state.slot_followup_answers = []
 
     # Retrieve candidate questions
     if plan.slot_type == SlotType.BEHAVIORAL:
@@ -357,88 +357,11 @@ def _cv_match_caption(question, cv: CVProfile | None) -> str:
     return f"\n> 📄 Picked from your CV: {rendered}\n"
 
 
-def evaluate_and_decide(
-    *,
-    slot_question,
-    followup_question,
-    answer: str,
-    director_rounds: int,
-    agents: dict,
-    turn_history_summary: str | None = None,
-) -> dict:
-    """Pure orchestrator for one user-answer turn.
-
-    Stateless on purpose: takes the inputs the Streamlit layer would normally
-    read from `st.session_state`, returns the outputs the Streamlit layer
-    would normally write back. Pulled out of `_handle_user_answer` so the
-    end-to-end behaviour (which question is graded, whether a follow-up is
-    installed, whether the loop guard fires) can be tested directly without
-    mocking Streamlit.
-
-    Returns a dict with:
-      active_question      — Question actually used for grading this answer
-      score_report         — Evaluator's verdict
-      choice               — possibly-degraded DirectorChoice
-      next_followup_question — synthetic Question to install if action != MOVE_ON,
-                               else None (signal to clear any active follow-up)
-    """
-    active_question = followup_question or slot_question
-
-    score_report = agents["evaluator"].evaluate(
-        question=active_question, user_answer=answer,
-    )
-
-    history = turn_history_summary or _default_history_summary(director_rounds)
-    choice = agents["director"].decide_next_action(
-        question=active_question,
-        user_answer=answer,
-        score_report=score_report,
-        turn_history_for_question=history,
-    )
-
-    # Loop guard: cap follow-ups at 1 to keep sessions short and avoid grilling.
-    if director_rounds >= 1 and choice.action != DirectorAction.MOVE_ON:
-        choice.action = DirectorAction.MOVE_ON
-        choice.text = ""
-        choice.follow_up_rubric = None
-        choice.follow_up_reference = None
-
-    # Defence #3: self-consistency check on the generated follow-up rubric.
-    if choice.action != DirectorAction.MOVE_ON:
-        choice = validate_followup_choice(
-            choice=choice,
-            slot_question=slot_question,
-            evaluator=agents["evaluator"],
-        )
-
-    next_followup = None
-    if choice.action != DirectorAction.MOVE_ON:
-        next_followup = build_followup_question(
-            choice=choice, slot_question=slot_question,
-        )
-
-    return {
-        "active_question": active_question,
-        "score_report": score_report,
-        "choice": choice,
-        "next_followup_question": next_followup,
-    }
-
-
-def _default_history_summary(director_rounds: int) -> str:
-    if director_rounds == 0:
-        return "(this is the first answer to this question)"
-    return (f"(the candidate has already had {director_rounds} "
-            f"follow-up round(s) on this question)")
-
-
 def _skip_current_question() -> None:
     """Commit a placeholder turn for a skipped question and advance.
 
     No LLM call. The TurnRecord stores a 1/5 ScoreReport with a `(skipped)`
-    feedback note, so the per-topic rolling score and the final coaching
-    report still treat the topic as weak — which is the truthful signal
-    when the candidate said "I don't know".
+    feedback note so the topic still registers as weak in the final report.
     """
     state: SessionState = st.session_state.session
     slot_question = st.session_state.current_question
@@ -463,10 +386,6 @@ def _skip_current_question() -> None:
         actionable_feedback=["candidate skipped — practice this topic"],
         overall=1,
     )
-
-    # If the active question was a follow-up, skipping closes both rounds
-    # of the slot. Clear the follow-up and commit against the slot question.
-    st.session_state.followup_question = None
     _commit_turn("(skipped)", skip_report)
 
     if state.turn_count() >= state.target_turns:
@@ -476,39 +395,54 @@ def _skip_current_question() -> None:
 
 
 def _handle_user_answer(answer: str) -> None:
-    """Apply `evaluate_and_decide` to st.session_state and the UI."""
+    """Evaluate the answer, run the Director, decide whether to stay or advance."""
     state: SessionState = st.session_state.session
     agents = get_agents()
-    slot_question = st.session_state.current_question
+    question = st.session_state.current_question
     plan: TurnPlan = st.session_state.current_slot
 
-    if slot_question is None or plan is None:
+    if question is None or plan is None:
         st.error("No active question. Refresh and start over.")
         return
 
-    # Show user answer
     st.session_state.chat_messages.append({"role": "user", "content": answer})
-    st.session_state.slot_answers.append(answer)
 
-    with st.spinner("Evaluating your answer..."):
-        result = evaluate_and_decide(
-            slot_question=slot_question,
-            followup_question=st.session_state.followup_question,
-            answer=answer,
-            director_rounds=st.session_state.director_rounds,
-            agents=agents,
+    is_first_turn = st.session_state.slot_score_report is None
+
+    if is_first_turn:
+        with st.spinner("Evaluating your answer..."):
+            score_report: ScoreReport = agents["evaluator"].evaluate(
+                question=question,
+                user_answer=answer,
+            )
+        st.session_state.slot_first_answer = answer
+        st.session_state.slot_score_report = score_report
+        feedback_md = _format_feedback(score_report)
+        st.session_state.chat_messages.append({"role": "assistant", "content": feedback_md})
+    else:
+        score_report = st.session_state.slot_score_report
+        st.session_state.slot_followup_answers.append(answer)
+
+    if st.session_state.director_rounds == 0:
+        history = "(this is the first answer to this question)"
+    else:
+        history = (f"(the candidate has already had {st.session_state.director_rounds} "
+                   f"follow-up round(s) on this question)")
+
+    with st.spinner("Deciding next move..."):
+        choice = agents["director"].decide_next_action(
+            question=question,
+            user_answer=answer,
+            score_report=score_report,
+            turn_history_for_question=history,
         )
-    score_report: ScoreReport = result["score_report"]
-    choice = result["choice"]
 
-    # Render feedback
-    feedback_md = _format_feedback(score_report)
-    st.session_state.chat_messages.append({"role": "assistant", "content": feedback_md})
+    # Loop guard: cap follow-ups at 1 round per slot.
+    if st.session_state.director_rounds >= 1 and choice.action != DirectorAction.MOVE_ON:
+        choice.action = DirectorAction.MOVE_ON
+        choice.text = ""
 
-    # If staying on this slot, install the synthesised follow-up Question and
-    # wait for the next user reply.
     if choice.action != DirectorAction.MOVE_ON:
-        st.session_state.followup_question = result["next_followup_question"]
         st.session_state.chat_messages.append({
             "role": "assistant",
             "content": f"_({choice.action.value})_\n\n{choice.text}",
@@ -516,28 +450,24 @@ def _handle_user_answer(answer: str) -> None:
         st.session_state.director_rounds += 1
         return
 
-    # MOVE_ON: persist this turn and advance. Clear any active follow-up.
-    st.session_state.followup_question = None
+    # MOVE_ON: combine all answers and re-evaluate if there were clarifications.
+    combined_answer = st.session_state.slot_first_answer or answer
+    for extra in st.session_state.slot_followup_answers:
+        combined_answer += f"\n\n[Clarification] {extra}"
 
-    # If this slot had a follow-up round, re-evaluate the combined answer
-    # against the original slot rubric and show the delta.
-    committed_answer = answer
-    committed_score = score_report
-    if st.session_state.director_rounds > 0 and len(st.session_state.slot_answers) > 1:
-        combined = "\n\n".join(st.session_state.slot_answers)
-        committed_answer = combined
+    final_score = score_report
+    if st.session_state.slot_followup_answers:
         with st.spinner("Re-evaluating with your full response..."):
             final_score = agents["evaluator"].evaluate(
-                question=slot_question,
-                user_answer=combined,
+                question=question,
+                user_answer=combined_answer,
             )
-        committed_score = final_score
         st.session_state.chat_messages.append({
             "role": "assistant",
             "content": _format_updated_feedback(score_report, final_score),
         })
 
-    _commit_turn(committed_answer, committed_score)
+    _commit_turn(combined_answer, final_score)
 
     if state.turn_count() >= state.target_turns:
         _finish_session()

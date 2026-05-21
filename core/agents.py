@@ -28,7 +28,6 @@ from core.models import (
     InterviewerChoice,
     Question,
     Role,
-    Rubric,
     ScoreReport,
     SessionState,
     SessionSummary,
@@ -343,21 +342,8 @@ Loop guards:
 - If the candidate has already had 1 clarify/followup/dig_deeper turn on the SAME question, choose move_on.
 - Default to move_on unless one of the other actions clearly applies.
 
-WHEN THE ACTION IS NOT move_on, YOU MUST ALSO EMIT:
-- `follow_up_rubric`  — a Rubric used to grade the candidate's NEXT answer to the
-                        follow-up question you just wrote. Criteria must be:
-                          • observable in a written answer (not "shows insight"),
-                          • specific to the follow-up question you actually asked
-                            (not a copy of the original rubric),
-                          • independently evaluable (a grader can mark each one true/false).
-                        Provide 2-4 `content` criteria; 1-2 `clarity` and `structure`
-                        criteria are optional but encouraged.
-- `follow_up_reference` — a model answer (3-6 sentences) that a strong candidate would
-                          give to your follow-up question. It must satisfy every
-                          criterion in `follow_up_rubric`; the system will check this
-                          and discard your follow-up if it doesn't.
-
-When the action IS move_on, leave `follow_up_rubric` and `follow_up_reference` null.
+When the action is not move_on, write the follow-up question in `text`.
+When the action IS move_on, leave `text` empty.
 
 Return ONLY a JSON object filled in with real values that satisfy the schema
 below. Do NOT return the schema definition itself — return actual data.
@@ -417,73 +403,6 @@ class ConversationDirectorAgent:
             turn_history=turn_history_for_question,
         )
         return call_llm(system=system, user=user, schema=DirectorChoice)
-
-
-# --- Follow-up question construction + self-consistency check (defence #3) --
-
-# Minimum overall score we require the Evaluator to give the Director's own
-# `follow_up_reference` answer when graded against `follow_up_rubric`. If a
-# *strong* model answer doesn't satisfy its own rubric, the rubric is broken.
-FOLLOWUP_SELF_CONSISTENCY_FLOOR = 4
-
-
-def build_followup_question(*, choice: DirectorChoice, slot_question: Question) -> Question:
-    """Synthesise a Question from a Director follow-up choice.
-
-    `slot_question` is the original KB question for this slot — its topic /
-    subtopic / difficulty are reused so downstream code (TurnRecord, topic
-    scoring) sees a coherent classification.
-
-    Caller must ensure choice.action != MOVE_ON and the follow-up fields are
-    populated; in practice this goes through `validate_followup_choice` first.
-    """
-    if choice.follow_up_rubric is None or not choice.follow_up_reference:
-        raise ValueError(
-            "build_followup_question requires follow_up_rubric and "
-            "follow_up_reference — call validate_followup_choice first."
-        )
-    return Question(
-        id=f"{slot_question.id}-followup",
-        topic=slot_question.topic,
-        subtopic=slot_question.subtopic,
-        difficulty=slot_question.difficulty,
-        question=choice.text,
-        reference_answer=choice.follow_up_reference,
-        rubric=choice.follow_up_rubric,
-    )
-
-
-def validate_followup_choice(
-    *,
-    choice: DirectorChoice,
-    slot_question: Question,
-    evaluator: EvaluatorAgent,
-    floor: int = FOLLOWUP_SELF_CONSISTENCY_FLOOR,
-) -> DirectorChoice:
-    """Runtime defence: only let a non-MOVE_ON choice through if its
-    self-generated rubric grades its self-generated reference answer at
-    or above `floor`. Otherwise degrade to MOVE_ON.
-
-    Why: the Director's follow-up rubric is LLM-written, so quality varies.
-    A model reference answer that fails its own rubric is the clearest
-    signal the rubric is unusable. Catching this at runtime means we never
-    grade a real candidate against a broken rubric — we just stop the
-    follow-up branch and move on.
-    """
-    if choice.action == DirectorAction.MOVE_ON:
-        return choice
-    if choice.follow_up_rubric is None or not choice.follow_up_reference:
-        return _move_on()
-    synth = build_followup_question(choice=choice, slot_question=slot_question)
-    report = evaluator.evaluate(question=synth, user_answer=choice.follow_up_reference)
-    if report.overall < floor:
-        return _move_on()
-    return choice
-
-
-def _move_on() -> DirectorChoice:
-    """Build a clean MOVE_ON choice — used when validation fails."""
-    return DirectorChoice(action=DirectorAction.MOVE_ON, text="")
 
 
 # ============================================================================

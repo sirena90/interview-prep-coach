@@ -13,8 +13,6 @@ from core.agents import (
     CoachingSummariserAgent,
     EvaluatorAgent,
     InterviewerAgent,
-    build_followup_question,
-    validate_followup_choice,
 )
 from core.models import (
     CriterionJudgement,
@@ -22,14 +20,11 @@ from core.models import (
     DirectorChoice,
     Difficulty,
     InterviewerChoice,
-    Rubric,
     ScoreReport,
     SessionSummary,
     SlotType,
     Topic,
 )
-from tests.conftest import fake_llm, make_question
-
 
 class TestInterviewerAgent:
     def test_single_candidate_still_calls_the_llm(self, fake_llm, make_question):
@@ -217,124 +212,19 @@ class TestConversationDirector:
         assert "my unique answer text" in prompt
         assert "2/5" in prompt
 
-    def test_director_carries_followup_rubric_and_reference(
+    def test_director_returns_non_move_on_with_text(
         self, fake_llm, make_question, make_score_report
     ):
-        # When picking a non-MOVE_ON action the Director emits its own rubric
-        # and reference answer — these have to survive serialisation through
-        # the LLM wrapper (Pydantic schema).
-        rubric = Rubric(
-            content=["names a prioritisation axis", "ties priority to impact"],
-            clarity=["uses concrete language"],
-        )
         fake_llm.queue(DirectorChoice, DirectorChoice(
             action=DirectorAction.DIG_DEEPER,
             text="How would you prioritise bugs you found during testing?",
-            follow_up_rubric=rubric,
-            follow_up_reference="Prioritise by user impact, frequency, and risk.",
         ))
         result = ConversationDirectorAgent().decide_next_action(
             question=make_question(), user_answer="answer",
             score_report=make_score_report(overall=5),
         )
         assert result.action is DirectorAction.DIG_DEEPER
-        assert result.follow_up_rubric is not None
-        assert "prioritisation" in result.follow_up_rubric.content[0]
-        assert "impact" in result.follow_up_reference
-
-
-class TestFollowupValidation:
-    """Defence #3 — validate_followup_choice + build_followup_question."""
-
-    def _dig_deeper(self):
-        return DirectorChoice(
-            action=DirectorAction.DIG_DEEPER,
-            text="How would you prioritise bugs found during testing?",
-            follow_up_rubric=Rubric(
-                content=["names a prioritisation axis", "ties priority to impact"],
-                clarity=["uses concrete language"],
-            ),
-            follow_up_reference="Prioritise by impact, frequency, and risk.",
-        )
-
-    def test_move_on_passes_through_without_evaluator_call(
-        self, fake_llm, make_question
-    ):
-        choice = DirectorChoice(action=DirectorAction.MOVE_ON, text="")
-        result = validate_followup_choice(
-            choice=choice,
-            slot_question=make_question(),
-            evaluator=EvaluatorAgent(),
-        )
-        assert result is choice
-        assert fake_llm.call_count == 0  # no evaluation needed for MOVE_ON
-
-    def test_self_consistent_choice_passes(
-        self, fake_llm, make_question, make_score_report
-    ):
-        # The evaluator grades the Director's reference answer at 5/5 against
-        # the Director's rubric → choice is good, return it unchanged.
-        fake_llm.queue(ScoreReport, make_score_report(overall=5))
-        choice = self._dig_deeper()
-        result = validate_followup_choice(
-            choice=choice,
-            slot_question=make_question(),
-            evaluator=EvaluatorAgent(),
-        )
-        assert result.action is DirectorAction.DIG_DEEPER
-        assert result is choice
-
-    def test_inconsistent_choice_degrades_to_move_on(
-        self, fake_llm, make_question, make_score_report
-    ):
-        # Reference answer scores 2 against its own rubric → rubric is broken.
-        # Validator must not let this through; the candidate would be graded
-        # against a junk rubric otherwise.
-        fake_llm.queue(ScoreReport, make_score_report(overall=2))
-        result = validate_followup_choice(
-            choice=self._dig_deeper(),
-            slot_question=make_question(),
-            evaluator=EvaluatorAgent(),
-        )
-        assert result.action is DirectorAction.MOVE_ON
-        assert result.text == ""
-
-    def test_missing_followup_fields_degrade_to_move_on(
-        self, fake_llm, make_question
-    ):
-        # Schema lets these through as None for legacy callers; the validator
-        # has to catch the case at runtime and degrade.
-        choice = DirectorChoice(action=DirectorAction.DIG_DEEPER, text="...?")
-        result = validate_followup_choice(
-            choice=choice,
-            slot_question=make_question(),
-            evaluator=EvaluatorAgent(),
-        )
-        assert result.action is DirectorAction.MOVE_ON
-        assert fake_llm.call_count == 0  # never reached the evaluator
-
-    def test_build_followup_question_inherits_slot_classification(
-        self, make_question
-    ):
-        # The synthetic Question must keep the slot's topic / subtopic /
-        # difficulty so TurnRecord + topic scoring stay coherent.
-        slot_q = make_question(qid="da-001", topic=Topic.SQL,
-                               difficulty=Difficulty.ENTRY)
-        synth = build_followup_question(
-            choice=self._dig_deeper(), slot_question=slot_q,
-        )
-        assert synth.id == "da-001-followup"
-        assert synth.topic is Topic.SQL
-        assert synth.subtopic == slot_q.subtopic
-        assert synth.difficulty is Difficulty.ENTRY
-        assert synth.question.startswith("How would you prioritise")
-
-    def test_build_followup_question_raises_when_fields_missing(
-        self, make_question
-    ):
-        choice = DirectorChoice(action=DirectorAction.DIG_DEEPER, text="...?")
-        with pytest.raises(ValueError):
-            build_followup_question(choice=choice, slot_question=make_question())
+        assert "prioritise" in result.text
 
 
 class TestCoachingSummariser:

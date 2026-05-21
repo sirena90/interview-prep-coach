@@ -170,19 +170,11 @@ class DirectorChoice(BaseModel):
     """Conversation Director output: what to do after each answer.
 
     If action == MOVE_ON, `text` is empty; planner picks the next question.
-    Otherwise `text` is the next message shown to the user, and the same
-    slot stays active. The follow-up question that `text` poses needs its own
-    grading anchor — the Director emits `follow_up_rubric` and
-    `follow_up_reference` for that, so the candidate's next answer can still
-    be graded by the rubric-based Evaluator. Both fields stay optional in
-    the schema so legacy MOVE_ON outputs validate; a runtime helper
-    (`validate_followup_choice`) verifies they are present and self-consistent
-    when the action is non-MOVE_ON.
+    Otherwise `text` is the next message shown to the user and the same
+    slot stays active for one more round.
     """
     action: DirectorAction
     text: str = ""
-    follow_up_rubric: Optional[Rubric] = None
-    follow_up_reference: Optional[str] = None
 
 
 class CVProfile(BaseModel):
