@@ -73,6 +73,16 @@ cp .env.example .env
 # Anthropic > OpenAI > Mistral.
 ```
 
+The model name per provider is also overridable in `.env` — useful if your
+account doesn't have access to the default model, or you want to use a
+different one without touching the code:
+
+```bash
+# ANTHROPIC_DEFAULT_MODEL=claude-sonnet-4-5-20250929
+# OPENAI_DEFAULT_MODEL=gpt-4o
+# MISTRAL_DEFAULT_MODEL=mistral-large-latest
+```
+
 Optional: set `LANGSMITH_API_KEY` + `LANGSMITH_TRACING=true` in `.env` to
 trace every LLM call in the LangSmith dashboard. Without it, calls still log
 locally to `logs/llm_calls.jsonl`.
@@ -93,6 +103,9 @@ The browser opens automatically at `http://localhost:8501`.
   LinkedIn profile as PDF** (Profile → More → Save to PDF).
 - No LinkedIn? Write a short .txt with your skills, experience and projects
   (200–300 words is enough).
+- You can pick **any role** — the CV is used to personalise the questions
+  *within* that role, not to choose the role. Practising a role outside
+  your background is a valid use case.
 
 ### Walkthrough
 
@@ -108,7 +121,9 @@ spinner) and starts the session.
 - Each question carries a small caption — *Topic: …, Difficulty: …* — and,
   when your CV matches the question, a *📄 Picked from your CV: …* badge so
   you can see which of your skills drove the choice.
-- Type your answer in the chat box and press Enter.
+- Type your answer in the chat box and press Enter. If you genuinely don't
+  know the question, click **⏭️ I don't know — skip this question** — the
+  app records a low score for the topic (no feedback) and moves on.
 - After each answer you get a **structured score**: overall 1–5, plus per-
   dimension scores (content / clarity / structure), short comments per
   dimension, and 2–4 concrete tips under *Improve:*.
@@ -207,7 +222,7 @@ Tests live in `tests/` (pytest) and `evals/` (eval pipeline). See
 ```bash
 pip install -r requirements-dev.txt      # install pytest
 
-pytest                # 98 fast tests, no API calls, no cost
+pytest                # 121 fast tests, no API calls, no cost
 pytest -m integration # + 7 KB tests (builds the Chroma index)
 
 python -m evals.run_evals                       # planner + retriever evals (free)

@@ -236,9 +236,9 @@ By default `pytest` runs **neither** — `pytest.ini` deselects them. So:
 
 | Command | Runs |
 |---|---|
-| `pytest` | 73 fast tests only |
+| `pytest` | 121 fast tests only |
 | `pytest -m integration` | the 7 integration tests only |
-| `pytest -m "not llm"` | everything except paid — all 80 |
+| `pytest -m "not llm"` | everything except paid — all 128 |
 
 This is the safety net: someone can clone the repo and run `pytest` with no
 API key, no network, and no cost.

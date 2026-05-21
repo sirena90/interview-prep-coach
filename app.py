@@ -33,6 +33,7 @@ from core.kb import KnowledgeBase
 from core.llm import set_retry_notifier
 from core.models import (
     CVProfile,
+    DimensionScore,
     DirectorAction,
     Difficulty,
     RollingScore,
@@ -98,7 +99,7 @@ def get_planner() -> SimplePlanner:
 def init_app_state() -> None:
     """Initialise the per-user state on first run."""
     if "phase" not in st.session_state:
-        st.session_state.phase = "setup"          # setup / interview / done
+        st.session_state.phase = "setup"           # setup / interview / done
         st.session_state.session = None            # SessionState (Pydantic)
         st.session_state.current_question = None   # the slot's KB Question
         st.session_state.followup_question = None  # synthesised Question for an active follow-up
@@ -106,6 +107,9 @@ def init_app_state() -> None:
         st.session_state.chat_messages = []        # list of {role, content}
         st.session_state.director_rounds = 0       # follow-up rounds within current question
         st.session_state.final_summary = None      # SessionSummary at end
+        st.session_state.final_summary_error = None  # last Coach failure, if any
+        st.session_state.fatal_error = None        # last unhandled exception in a phase
+        st.session_state.fatal_error_type = None
         st.session_state.cv_profile = None         # CVProfile from upload
 
 
@@ -222,6 +226,15 @@ def render_interview() -> None:
     for msg in st.session_state.chat_messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
+
+    # Skip button — for the candidate who genuinely doesn't know. Commits a
+    # placeholder low-score turn (no LLM call) so the topic still registers
+    # as a weak area in the final report, then advances.
+    if st.button("⏭️ I don't know — skip this question",
+                 help="Move on without answering. Counts as a weak attempt "
+                      "for this topic, no feedback is generated."):
+        _skip_current_question()
+        st.rerun()
 
     # Get user answer
     user_input = st.chat_input("Type your answer...")
@@ -389,6 +402,49 @@ def _default_history_summary(director_rounds: int) -> str:
             f"follow-up round(s) on this question)")
 
 
+def _skip_current_question() -> None:
+    """Commit a placeholder turn for a skipped question and advance.
+
+    No LLM call. The TurnRecord stores a 1/5 ScoreReport with a `(skipped)`
+    feedback note, so the per-topic rolling score and the final coaching
+    report still treat the topic as weak — which is the truthful signal
+    when the candidate said "I don't know".
+    """
+    state: SessionState = st.session_state.session
+    slot_question = st.session_state.current_question
+    plan = st.session_state.current_slot
+    if slot_question is None or plan is None or state is None:
+        st.error("No active question to skip.")
+        return
+
+    st.session_state.chat_messages.append({
+        "role": "user", "content": "_(skipped)_",
+    })
+    st.session_state.chat_messages.append({
+        "role": "assistant",
+        "content": "_Question skipped — moving on. This topic counts as a "
+                   "weak area in your final report._",
+    })
+
+    skip_report = ScoreReport(
+        content=DimensionScore(score=1, comment="skipped"),
+        clarity=DimensionScore(score=1, comment="skipped"),
+        structure=DimensionScore(score=1, comment="skipped"),
+        actionable_feedback=["candidate skipped — practice this topic"],
+        overall=1,
+    )
+
+    # If the active question was a follow-up, skipping closes both rounds
+    # of the slot. Clear the follow-up and commit against the slot question.
+    st.session_state.followup_question = None
+    _commit_turn("(skipped)", skip_report)
+
+    if state.turn_count() >= state.target_turns:
+        _finish_session()
+    else:
+        _advance_to_next_question()
+
+
 def _handle_user_answer(answer: str) -> None:
     """Apply `evaluate_and_decide` to st.session_state and the UI."""
     state: SessionState = st.session_state.session
@@ -480,17 +536,53 @@ def _format_feedback(report: ScoreReport) -> str:
 # ============================================================================
 
 def _finish_session() -> None:
+    """Generate the coaching report. On Coach failure, transition to `done`
+    anyway with `final_summary=None` and a stored error message; render_final
+    will surface a Retry button. Session state is fully preserved so retry
+    is a single re-call against the same SessionState.
+    """
     state: SessionState = st.session_state.session
     state.ended_at = datetime.now(timezone.utc)
     agents = get_agents()
-    with st.spinner("Writing your personalised coaching report..."):
-        st.session_state.final_summary = agents["coach"].summarise(state)
+    try:
+        with st.spinner("Writing your personalised coaching report..."):
+            st.session_state.final_summary = agents["coach"].summarise(state)
+        st.session_state.final_summary_error = None
+    except Exception as exc:  # noqa: BLE001 — Coach can raise many things
+        st.session_state.final_summary = None
+        st.session_state.final_summary_error = f"{type(exc).__name__}: {exc}"
     st.session_state.phase = "done"
 
 
 def render_final() -> None:
     state: SessionState = st.session_state.session
     summary = st.session_state.final_summary
+    err = st.session_state.get("final_summary_error")
+
+    # Coach failed (e.g. JSON decode error, exhausted rate-limit retries).
+    # Don't lose the session — show what we have, explain, offer a retry.
+    if err and not summary:
+        st.title("🏁 Session complete — final report unavailable")
+        st.markdown(
+            f"**{ROLE_LABELS[state.role]}** · {DIFFICULTY_LABELS[state.difficulty]} · "
+            f"{state.turn_count()} questions answered"
+        )
+        st.warning(
+            f"Could not generate the coaching report: {err}\n\n"
+            "Your answers are still saved. This is usually transient — "
+            "try again."
+        )
+        col_a, col_b = st.columns(2)
+        with col_a:
+            if st.button("🔄 Retry final report", type="primary"):
+                _finish_session()
+                st.rerun()
+        with col_b:
+            if st.button("Start a new session"):
+                for key in list(st.session_state.keys()):
+                    del st.session_state[key]
+                st.rerun()
+        return
 
     st.title("🏁 Session complete")
     st.markdown(
@@ -537,6 +629,14 @@ def render_final() -> None:
 
 def main() -> None:
     init_app_state()
+
+    # If the previous run raised, surface the error and offer a retry
+    # *before* trying to render the failed phase again. Session state is
+    # preserved so retry resumes from where the user was.
+    if st.session_state.get("fatal_error"):
+        _render_fatal_error_banner()
+        return
+
     phase = st.session_state.phase
 
     try:
@@ -548,10 +648,39 @@ def main() -> None:
             render_final()
         else:
             st.error(f"Unknown phase: {phase}")
-    except RuntimeError as exc:
-        # Raised when the LLM provider keeps rate-limiting after all retries,
-        # or when a provider is misconfigured. Show the message, not a crash.
-        st.error(str(exc))
+    except Exception as exc:  # noqa: BLE001 — any agent / network / parser error
+        st.session_state.fatal_error = str(exc) or type(exc).__name__
+        st.session_state.fatal_error_type = type(exc).__name__
+        st.rerun()
+
+
+def _render_fatal_error_banner() -> None:
+    """Generic 'session paused' UI for any unhandled exception in a phase.
+
+    The user's progress is intact (chat history, session, CV); only the
+    *current* operation failed. Retry simply clears the error flag and
+    reruns the same phase. Common triggers: transient LLM JSON decode
+    failures, exhausted rate-limit retries, network blips.
+    """
+    err = st.session_state.get("fatal_error", "unknown error")
+    err_type = st.session_state.get("fatal_error_type", "Error")
+    st.error(
+        f"⚠️ **Session paused — {err_type}**\n\n"
+        f"{err}\n\n"
+        "Your progress is saved. This is usually transient (API rate limit "
+        "or a model output that failed to parse). Click Retry to resume."
+    )
+    col_a, col_b = st.columns(2)
+    with col_a:
+        if st.button("🔄 Retry", type="primary"):
+            st.session_state.fatal_error = None
+            st.session_state.fatal_error_type = None
+            st.rerun()
+    with col_b:
+        if st.button("Start over"):
+            for key in list(st.session_state.keys()):
+                del st.session_state[key]
+            st.rerun()
 
 
 if __name__ == "__main__":

@@ -464,11 +464,11 @@ responsibility principle for agents.
 
 ## 10. Testing, evaluation, and observability
 
-- **`tests/`** — pytest suite (108 fast tests + 7 integration). Uses a
+- **`tests/`** — pytest suite (121 fast tests + 7 integration). Uses a
   FakeLLM so no real API calls are made; covers models, planner, the LLM
   wrapper (rate-limit retry, repair, tool use), the four agents, the CV
-  parser, the evals pipeline's pure logic, and KB retrieval. Run with
-  `pytest`.
+  parser, the per-answer orchestrator wiring, the evals pipeline's pure
+  logic, and KB retrieval. Run with `pytest`.
 - **`evals/`** — task baskets + graders + a leaderboard. Six baskets:
   - **Planner** — deterministic slot/topic/difficulty scheduling (free).
   - **Retriever** — topic filter + CV-aware rerank (free).
