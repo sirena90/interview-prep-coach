@@ -361,13 +361,28 @@ def _handle_user_answer(answer: str) -> None:
         return
 
     # MOVE_ON: persist this turn and advance.
-    # The committed answer is the first answer plus any clarifications, so
-    # the Coach sees the full picture in the final report. The score remains
-    # the one computed on the first answer.
+    # If there were follow-up clarifications, re-evaluate the COMBINED answer
+    # against the rubric so the final score reflects the full picture, not
+    # just the first answer in isolation. This is fair because the rubric
+    # is applied to the user's full response, not to a clarification fragment.
     combined_answer = st.session_state.slot_first_answer or answer
     for extra in st.session_state.slot_followup_answers:
         combined_answer += f"\n\n[Clarification] {extra}"
-    _commit_turn(combined_answer, score_report)
+
+    final_score = score_report
+    if st.session_state.slot_followup_answers:
+        with st.spinner("Re-evaluating with your clarification..."):
+            final_score = agents["evaluator"].evaluate(
+                question=question,
+                user_answer=combined_answer,
+            )
+        # Show the updated feedback before moving on.
+        st.session_state.chat_messages.append({
+            "role": "assistant",
+            "content": _format_updated_feedback(score_report, final_score),
+        })
+
+    _commit_turn(combined_answer, final_score)
 
     if state.turn_count() >= state.target_turns:
         _finish_session()
@@ -414,6 +429,32 @@ def _format_feedback(report: ScoreReport) -> str:
         f"- Content: {report.content.comment}\n"
         f"- Clarity: {report.clarity.comment}\n"
         f"- Structure: {report.structure.comment}\n\n"
+        f"**Improve:** {tips}"
+    )
+
+
+def _format_updated_feedback(initial: ScoreReport, final: ScoreReport) -> str:
+    """Show the re-evaluated score after a clarification, with deltas vs the initial score.
+
+    Called only when the slot had at least one follow-up answer. The final score
+    reflects the combined (first + clarifications) answer scored against the rubric.
+    """
+    def _arrow(a: int, b: int) -> str:
+        if b > a:
+            return f"{a} → {b} ↑"
+        if b < a:
+            return f"{a} → {b} ↓"
+        return f"{b}"
+
+    tips = "; ".join(final.actionable_feedback)
+    return (
+        f"**Updated after your clarification — overall {_arrow(initial.overall, final.overall)}/5** "
+        f"(content {_arrow(initial.content.score, final.content.score)}, "
+        f"clarity {_arrow(initial.clarity.score, final.clarity.score)}, "
+        f"structure {_arrow(initial.structure.score, final.structure.score)})\n\n"
+        f"- Content: {final.content.comment}\n"
+        f"- Clarity: {final.clarity.comment}\n"
+        f"- Structure: {final.structure.comment}\n\n"
         f"**Improve:** {tips}"
     )
 
