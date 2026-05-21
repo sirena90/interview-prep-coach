@@ -329,7 +329,7 @@ After each answer, you choose ONE action from this fixed set:
   move_on    — the question is exhausted. Hand back to the planner; it picks the next slot.
 
 Loop guards:
-- If the candidate has already had 2 clarify/followup/dig_deeper turns on the SAME question, choose move_on.
+- If the candidate has already had 1 clarify/followup/dig_deeper turn on the SAME question, choose move_on.
 - Default to move_on unless one of the other actions clearly applies.
 
 Return ONLY a JSON object filled in with real values that satisfy the schema

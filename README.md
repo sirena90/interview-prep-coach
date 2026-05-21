@@ -26,7 +26,7 @@ Q5 — REINFORCE   (same topic as Q4, difficulty adapts to score)
 After each answer the **Conversation Director agent** decides whether to
 stay on the current question (`clarify` / `followup` / `dig_deeper`) or
 to move on to the next planned slot (`move_on`). The Director is capped at
-**2 follow-up rounds per slot** so a single slot can't trap the session.
+**1 follow-up round per slot** so a single slot can't trap the session.
 
 For reinforce slots the difficulty adapts to the previous score: weak
 (< 0.4) → step down, strong (> 0.85) → step up, otherwise stay. Floored at

@@ -325,8 +325,8 @@ def _handle_user_answer(answer: str) -> None:
             turn_history_for_question=history_summary,
         )
 
-    # Loop guard: cap follow-ups at 2 to prevent infinite stay
-    if st.session_state.director_rounds >= 2 and choice.action != DirectorAction.MOVE_ON:
+    # Loop guard: cap follow-ups at 1 to keep sessions short and avoid grilling
+    if st.session_state.director_rounds >= 1 and choice.action != DirectorAction.MOVE_ON:
         choice.action = DirectorAction.MOVE_ON
         choice.text = ""
 
