@@ -108,6 +108,7 @@ def init_app_state() -> None:
         st.session_state.current_slot = None       # the active TurnPlan
         st.session_state.chat_messages = []        # list of {role, content}
         st.session_state.director_rounds = 0       # follow-up rounds within current question
+        st.session_state.slot_answers = []         # all answers given in the current slot
         st.session_state.final_summary = None      # SessionSummary at end
         st.session_state.final_summary_error = None  # last Coach failure, if any
         st.session_state.fatal_error = None        # last unhandled exception in a phase
@@ -255,6 +256,7 @@ def _advance_to_next_question() -> None:
     st.session_state.current_slot = plan
     st.session_state.director_rounds = 0
     st.session_state.followup_question = None
+    st.session_state.slot_answers = []
 
     # Retrieve candidate questions
     if plan.slot_type == SlotType.BEHAVIORAL:
@@ -486,6 +488,7 @@ def _handle_user_answer(answer: str) -> None:
 
     # Show user answer
     st.session_state.chat_messages.append({"role": "user", "content": answer})
+    st.session_state.slot_answers.append(answer)
 
     with st.spinner("Evaluating your answer..."):
         result = evaluate_and_decide(
@@ -515,7 +518,26 @@ def _handle_user_answer(answer: str) -> None:
 
     # MOVE_ON: persist this turn and advance. Clear any active follow-up.
     st.session_state.followup_question = None
-    _commit_turn(answer, score_report)
+
+    # If this slot had a follow-up round, re-evaluate the combined answer
+    # against the original slot rubric and show the delta.
+    committed_answer = answer
+    committed_score = score_report
+    if st.session_state.director_rounds > 0 and len(st.session_state.slot_answers) > 1:
+        combined = "\n\n".join(st.session_state.slot_answers)
+        committed_answer = combined
+        with st.spinner("Re-evaluating with your full response..."):
+            final_score = agents["evaluator"].evaluate(
+                question=slot_question,
+                user_answer=combined,
+            )
+        committed_score = final_score
+        st.session_state.chat_messages.append({
+            "role": "assistant",
+            "content": _format_updated_feedback(score_report, final_score),
+        })
+
+    _commit_turn(committed_answer, committed_score)
 
     if state.turn_count() >= state.target_turns:
         _finish_session()
@@ -555,6 +577,28 @@ def _format_feedback(report: ScoreReport) -> str:
         f"- Content: {report.content.comment}\n"
         f"- Clarity: {report.clarity.comment}\n"
         f"- Structure: {report.structure.comment}\n\n"
+        f"**Improve:** {tips}"
+    )
+
+
+def _format_updated_feedback(initial: ScoreReport, final: ScoreReport) -> str:
+    """Show re-evaluated score after a clarification round, with deltas vs the initial."""
+    def _arrow(a: int, b: int) -> str:
+        if b > a:
+            return f"{a} → {b} ↑"
+        if b < a:
+            return f"{a} → {b} ↓"
+        return str(b)
+
+    tips = "; ".join(final.actionable_feedback)
+    return (
+        f"**Updated score (full response) — overall {_arrow(initial.overall, final.overall)}/5** "
+        f"(content {_arrow(initial.content.score, final.content.score)}, "
+        f"clarity {_arrow(initial.clarity.score, final.clarity.score)}, "
+        f"structure {_arrow(initial.structure.score, final.structure.score)})\n\n"
+        f"- Content: {final.content.comment}\n"
+        f"- Clarity: {final.clarity.comment}\n"
+        f"- Structure: {final.structure.comment}\n\n"
         f"**Improve:** {tips}"
     )
 
