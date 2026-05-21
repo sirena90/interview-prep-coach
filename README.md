@@ -219,12 +219,25 @@ version keeps state in memory, no SQLite. A refresh starts a new session.
 Tests live in `tests/` (pytest) and `evals/` (eval pipeline). See
 [`TESTING.md`](TESTING.md) for the full guide.
 
-```bash
-pip install -r requirements-dev.txt      # install pytest
+**Before running any test or eval command**, install the dev dependencies:
 
+```bash
+pip install -r requirements-dev.txt      # adds pytest, pytest-cov — required for tests and evals
+```
+
+Then:
+
+```bash
 pytest                # 121 fast tests, no API calls, no cost
 pytest -m integration # + 7 KB tests (builds the Chroma index)
+```
 
+> **Important:** eval scripts must be run as Python *modules* (with `-m`), not
+> as plain scripts. Use `python -m evals.run_evals`, **not**
+> `python evals/run_evals.py` — the latter causes an `ImportError` because the
+> package imports won't resolve.
+
+```bash
 python -m evals.run_evals                       # planner + retriever evals (free)
 python -m evals.run_evals --director            # + Director agent (real API calls)
 python -m evals.run_evals --interviewer         # + Interviewer agent: selection / anchor / fidelity (paid)

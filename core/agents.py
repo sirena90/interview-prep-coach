@@ -636,7 +636,7 @@ class CoachingSummariserAgent:
             tool_executor=tool_executor,
             max_tokens=2048,
             temperature=0.3,
-            max_iterations=8,
+            max_iterations=12,
         )
 
 
