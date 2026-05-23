@@ -118,6 +118,7 @@ ROLE_LABELS = {
     Role.QA_ENGINEER: "QA Engineer",
     Role.DATA_ENGINEER: "Data Engineer",
     Role.FRONTEND_DEVELOPER: "Frontend Developer",
+    Role.SOFTWARE_ENGINEER: "Software Engineer",
 }
 
 DIFFICULTY_LABELS = {

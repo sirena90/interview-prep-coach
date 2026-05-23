@@ -438,7 +438,26 @@ def _tool_loop_anthropic(
             b.text for b in response.content
             if getattr(b, "type", None) == "text"
         ).strip()
-        return schema.model_validate(json.loads(_strip_fences(text)))
+        try:
+            return schema.model_validate(json.loads(_strip_fences(text)))
+        except Exception as first_error:
+            # Empty or invalid JSON — ask once more for just the JSON output.
+            messages.append({"role": "assistant", "content": response.content or text})
+            messages.append({"role": "user", "content": (
+                "Your previous response did not contain valid JSON.\n"
+                f"Error: {first_error}\n\n"
+                "Please return ONLY a valid JSON object satisfying the schema. "
+                "No prose, no code fences."
+            )})
+            repair = _retry_on_rate_limit(lambda: client.messages.create(
+                model=model, max_tokens=max_tokens, temperature=temperature,
+                system=system, tools=anthropic_tools, messages=messages,
+            ))
+            repair_text = "\n".join(
+                b.text for b in repair.content
+                if getattr(b, "type", None) == "text"
+            ).strip()
+            return schema.model_validate(json.loads(_strip_fences(repair_text)))
 
     raise RuntimeError(
         f"Tool-use loop exceeded {max_iterations} iterations without a final answer."
@@ -479,7 +498,22 @@ def _tool_loop_openai(
             continue
 
         text = (message.content or "").strip()
-        return schema.model_validate(json.loads(_strip_fences(text)))
+        try:
+            return schema.model_validate(json.loads(_strip_fences(text)))
+        except Exception as first_error:
+            messages.append(message)
+            messages.append({"role": "user", "content": (
+                "Your previous response did not contain valid JSON.\n"
+                f"Error: {first_error}\n\n"
+                "Please return ONLY a valid JSON object satisfying the schema. "
+                "No prose, no code fences."
+            )})
+            repair = _retry_on_rate_limit(lambda: client.chat.completions.create(
+                model=model, max_tokens=max_tokens, temperature=temperature,
+                tools=openai_tools, messages=messages,
+            ))
+            repair_text = (repair.choices[0].message.content or "").strip()
+            return schema.model_validate(json.loads(_strip_fences(repair_text)))
 
     raise RuntimeError(
         f"Tool-use loop exceeded {max_iterations} iterations without a final answer."
