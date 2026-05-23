@@ -202,7 +202,22 @@ class KnowledgeBase:
                 if qid not in excluded
             ]
 
-        # Step 4: CV-aware reranking.
+        # Step 4: Topic-agnostic fallback — topic has only 1 question and it's
+        # already been asked (e.g. api_testing, frontend_security). Return any
+        # non-excluded question so the session is never stuck.
+        if not candidate_ids:
+            results = self._collection.query(
+                query_texts=[query],
+                n_results=max(k * 3, 10),
+            )
+            candidate_ids = [
+                qid for qid in (results.get("ids", [[]])[0] or [])
+                if qid not in excluded
+                and self._questions.get(qid) is not None
+                and self._questions[qid].topic != Topic.BEHAVIOURAL
+            ]
+
+        # Step 5: CV-aware reranking.
         if cv_skills:
             cv_set = {s.lower().strip() for s in cv_skills}
             candidate_ids = sorted(
@@ -233,6 +248,17 @@ class KnowledgeBase:
             qid for qid in (results.get("ids", [[]])[0] or [])
             if qid not in excluded
         ]
+        # Fallback: any behavioural difficulty if target level is exhausted.
+        if not ids:
+            results = self._collection.query(
+                query_texts=["behavioural STAR interview question"],
+                n_results=max(k * 3, 10),
+                where={"topic": Topic.BEHAVIOURAL.value},
+            )
+            ids = [
+                qid for qid in (results.get("ids", [[]])[0] or [])
+                if qid not in excluded
+            ]
         return [self._questions[qid] for qid in ids[:k]]
 
     def get(self, question_id: str) -> Question:
